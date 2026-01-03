@@ -227,7 +227,8 @@ void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rat
 
     // Calculate smooth pacing parameters
     // bytes_per_sec = rate_mbps * 1000000 / 8
-    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL;
+    // Add 9% overhead compensation for syscall/timing overhead at high pps
+    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL * 109ULL / 100ULL;
 #if IMIX_ENABLED
     uint64_t packets_per_sec = bytes_per_sec / RAW_IMIX_AVG_PACKET_SIZE;
 #else

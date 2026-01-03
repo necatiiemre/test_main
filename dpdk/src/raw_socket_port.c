@@ -270,8 +270,8 @@ bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
         return false;
     }
 
-    // If we're too far behind (>2ms), reset to now (prevents large burst)
-    if (limiter->next_send_time_ns + 2000000ULL < now) {
+    // If we're too far behind (>10ms), reset to now (prevents large burst)
+    if (limiter->next_send_time_ns + 10000000ULL < now) {
         limiter->next_send_time_ns = now;
     }
 

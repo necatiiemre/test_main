@@ -224,16 +224,19 @@ void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rat
 
 #if IMIX_ENABLED
     // IMIX: Use token bucket instead of smooth pacing
-    // Larger burst size to handle variable packet sizes efficiently
-    // 10ms worth of tokens = allows catching up without losing packets
-    limiter->max_tokens = limiter->tokens_per_sec / 100;  // 10ms burst window
-    limiter->tokens = limiter->max_tokens / 2;  // Start half full (stagger effect)
+    // Apply 18% overhead compensation (205/240 = 85% efficiency observed)
+    uint64_t compensated_rate = (limiter->tokens_per_sec * 118) / 100;
+    limiter->tokens_per_sec = compensated_rate;
+
+    // 50ms burst window for better handling of variable packet sizes
+    limiter->max_tokens = limiter->tokens_per_sec / 20;  // 50ms burst window
+    limiter->tokens = limiter->max_tokens;  // Start full for immediate sending
     limiter->last_update_ns = get_time_ns();
     limiter->smooth_pacing_enabled = false;  // Use token bucket for IMIX
 
-    printf("[Raw Rate Limiter] Target %u: rate=%u Mbps, TOKEN BUCKET mode "
-           "(IMIX), bucket=%lu bytes (10ms)\n",
-           target_id, rate_mbps, limiter->max_tokens);
+    printf("[Raw Rate Limiter] Target %u: rate=%u Mbps (+18%% overhead = %lu bytes/s), "
+           "TOKEN BUCKET, bucket=%lu bytes (50ms)\n",
+           target_id, rate_mbps, compensated_rate, limiter->max_tokens);
 #else
     // Fixed packet size: use smooth pacing for consistent timing
     limiter->max_tokens = limiter->tokens_per_sec / 2000;  // 0.5ms burst

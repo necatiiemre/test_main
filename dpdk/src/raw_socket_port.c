@@ -989,9 +989,9 @@ void *raw_tx_worker(void *arg)
     // IMIX: Worker offset (her target için farklı pattern başlangıcı)
     uint8_t imix_offset = (uint8_t)(port->port_id % IMIX_PATTERN_SIZE);
     uint64_t imix_counter = 0;
-    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING, 32 sizes, 64 packets)\n",
+    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING, 16 sizes, 27 packets)\n",
            port->port_id, port->tx_target_count);
-    printf("[Port %u TX] IMIX pattern: 66x3..1514x1 (avg=%d bytes)\n",
+    printf("[Port %u TX] IMIX pattern: 71x2..1514x1 (avg=%d bytes)\n",
            port->port_id, RAW_IMIX_AVG_PACKET_SIZE);
 #else
     printf("[Port %u TX Worker] Started with %u targets (SMOOTH PACING)\n",

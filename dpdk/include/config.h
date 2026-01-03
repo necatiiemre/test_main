@@ -8,46 +8,98 @@
 // ==========================================
 // IMIX (Internet Mix) CONFIGURATION
 // ==========================================
-// Özel IMIX profili: Farklı paket boyutlarının dağılımı
-// Toplam oran: %10 + %10 + %10 + %10 + %30 + %30 = %100
+// Gelişmiş IMIX profili: 32 farklı paket boyutu, 64 paketlik döngü
 //
-// 10 paketlik döngüde:
-//   1x 100 byte  (%10)
-//   1x 200 byte  (%10)
-//   1x 400 byte  (%10)
-//   1x 800 byte  (%10)
-//   3x 1200 byte (%30)
-//   3x 1518 byte (%30)  - MTU sınırı
+// Katsayılar:
+//   x3: 70, 105, 195, 215, 285, 325, 375, 435, 465, 445, 455 (11 boyut × 3 = 33 paket)
+//   x2: 505, 595, 615, 685, 725, 775, 835, 865, 945, 955 (10 boyut × 2 = 20 paket)
+//   x1: 1015, 1085, 1125, 1175, 1235, 1265, 1345, 1365, 1405, 1495, 1518 (11 boyut × 1 = 11 paket)
 //
-// Ortalama paket boyutu: ~964 byte
+// Toplam: 33 + 20 + 11 = 64 paket
+// Ortalama paket boyutu: ~612 byte
 
 #define IMIX_ENABLED 1
 
 // IMIX boyut seviyeleri (Ethernet frame boyutu, VLAN dahil)
-#define IMIX_SIZE_1    100    // En küçük
-#define IMIX_SIZE_2    200
-#define IMIX_SIZE_3    400
-#define IMIX_SIZE_4    800
-#define IMIX_SIZE_5    1200
-#define IMIX_SIZE_6    1518   // MTU sınırı (VLAN ile 1522, ama 1518 güvenli)
+// x3 katsayılı boyutlar (her biri 3 kez)
+#define IMIX_SIZE_01    70
+#define IMIX_SIZE_02    105
+#define IMIX_SIZE_03    195
+#define IMIX_SIZE_04    215
+#define IMIX_SIZE_05    285
+#define IMIX_SIZE_06    325
+#define IMIX_SIZE_07    375
+#define IMIX_SIZE_08    435
+#define IMIX_SIZE_09    465
+#define IMIX_SIZE_10    445
+#define IMIX_SIZE_11    455
 
-// IMIX pattern boyutu (10 paketlik döngü)
-#define IMIX_PATTERN_SIZE 10
+// x2 katsayılı boyutlar (her biri 2 kez)
+#define IMIX_SIZE_12    505
+#define IMIX_SIZE_13    595
+#define IMIX_SIZE_14    615
+#define IMIX_SIZE_15    685
+#define IMIX_SIZE_16    725
+#define IMIX_SIZE_17    775
+#define IMIX_SIZE_18    835
+#define IMIX_SIZE_19    865
+#define IMIX_SIZE_20    945
+#define IMIX_SIZE_21    955
+
+// x1 katsayılı boyutlar (her biri 1 kez)
+#define IMIX_SIZE_22    1015
+#define IMIX_SIZE_23    1085
+#define IMIX_SIZE_24    1125
+#define IMIX_SIZE_25    1175
+#define IMIX_SIZE_26    1235
+#define IMIX_SIZE_27    1265
+#define IMIX_SIZE_28    1345
+#define IMIX_SIZE_29    1365
+#define IMIX_SIZE_30    1405
+#define IMIX_SIZE_31    1495
+#define IMIX_SIZE_32    1518   // MTU sınırı
+
+// IMIX pattern boyutu (64 paketlik döngü)
+#define IMIX_PATTERN_SIZE 64
 
 // IMIX ortalama paket boyutu (rate limiting için)
-// (100 + 200 + 400 + 800 + 1200*3 + 1518*3) / 10 = 964.4
-#define IMIX_AVG_PACKET_SIZE 964
+// Toplam: (70+105+195+215+285+325+375+435+465+445+455)*3 + (505+595+615+685+725+775+835+865+945+955)*2 + (1015+1085+1125+1175+1235+1265+1345+1365+1405+1495+1518)*1 = 39138
+// Ortalama: 39138 / 64 = 611.53 ≈ 612
+#define IMIX_AVG_PACKET_SIZE 612
 
 // IMIX minimum ve maksimum boyutlar
-#define IMIX_MIN_PACKET_SIZE IMIX_SIZE_1
-#define IMIX_MAX_PACKET_SIZE IMIX_SIZE_6
+#define IMIX_MIN_PACKET_SIZE IMIX_SIZE_01
+#define IMIX_MAX_PACKET_SIZE IMIX_SIZE_32
 
-// IMIX pattern dizisi (statik tanım - her worker kendi offset'i ile kullanır)
-// Sıra: 100, 200, 400, 800, 1200, 1200, 1200, 1518, 1518, 1518
+// IMIX pattern dizisi (64 paketlik - her worker kendi offset'i ile kullanır)
 #define IMIX_PATTERN_INIT { \
-    IMIX_SIZE_1, IMIX_SIZE_2, IMIX_SIZE_3, IMIX_SIZE_4, \
-    IMIX_SIZE_5, IMIX_SIZE_5, IMIX_SIZE_5, \
-    IMIX_SIZE_6, IMIX_SIZE_6, IMIX_SIZE_6 \
+    /* x3 boyutlar (33 paket) */ \
+    IMIX_SIZE_01, IMIX_SIZE_01, IMIX_SIZE_01, \
+    IMIX_SIZE_02, IMIX_SIZE_02, IMIX_SIZE_02, \
+    IMIX_SIZE_03, IMIX_SIZE_03, IMIX_SIZE_03, \
+    IMIX_SIZE_04, IMIX_SIZE_04, IMIX_SIZE_04, \
+    IMIX_SIZE_05, IMIX_SIZE_05, IMIX_SIZE_05, \
+    IMIX_SIZE_06, IMIX_SIZE_06, IMIX_SIZE_06, \
+    IMIX_SIZE_07, IMIX_SIZE_07, IMIX_SIZE_07, \
+    IMIX_SIZE_08, IMIX_SIZE_08, IMIX_SIZE_08, \
+    IMIX_SIZE_09, IMIX_SIZE_09, IMIX_SIZE_09, \
+    IMIX_SIZE_10, IMIX_SIZE_10, IMIX_SIZE_10, \
+    IMIX_SIZE_11, IMIX_SIZE_11, IMIX_SIZE_11, \
+    /* x2 boyutlar (20 paket) */ \
+    IMIX_SIZE_12, IMIX_SIZE_12, \
+    IMIX_SIZE_13, IMIX_SIZE_13, \
+    IMIX_SIZE_14, IMIX_SIZE_14, \
+    IMIX_SIZE_15, IMIX_SIZE_15, \
+    IMIX_SIZE_16, IMIX_SIZE_16, \
+    IMIX_SIZE_17, IMIX_SIZE_17, \
+    IMIX_SIZE_18, IMIX_SIZE_18, \
+    IMIX_SIZE_19, IMIX_SIZE_19, \
+    IMIX_SIZE_20, IMIX_SIZE_20, \
+    IMIX_SIZE_21, IMIX_SIZE_21, \
+    /* x1 boyutlar (11 paket) */ \
+    IMIX_SIZE_22, IMIX_SIZE_23, IMIX_SIZE_24, IMIX_SIZE_25, \
+    IMIX_SIZE_26, IMIX_SIZE_27, IMIX_SIZE_28, IMIX_SIZE_29, \
+    IMIX_SIZE_30, IMIX_SIZE_31, IMIX_SIZE_32 \
 }
 
 // ==========================================

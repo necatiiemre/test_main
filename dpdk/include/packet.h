@@ -76,11 +76,11 @@
 #define MAX_PRBS_BYTES NUM_PRBS_BYTES  // 1459 (VLAN) veya 1463 (non-VLAN)
 
 // IMIX için minimum payload boyutu
-// 100 byte paket: 100 - L2(18) - IP(20) - UDP(8) = 54 byte payload
-// Payload = SEQ(8) + PRBS(46) minimum
-#define MIN_IMIX_PAYLOAD_VLAN    (100 - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
-#define MIN_IMIX_PAYLOAD_NO_VLAN (100 - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
-#define MIN_IMIX_PRBS_BYTES      (MIN_IMIX_PAYLOAD_VLAN - SEQ_BYTES)  // 46 bytes
+// 70 byte paket: 70 - L2(18) - IP(20) - UDP(8) = 24 byte payload
+// Payload = SEQ(8) + PRBS(16) minimum
+#define MIN_IMIX_PAYLOAD_VLAN    (70 - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
+#define MIN_IMIX_PAYLOAD_NO_VLAN (70 - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
+#define MIN_IMIX_PRBS_BYTES      (MIN_IMIX_PAYLOAD_VLAN - SEQ_BYTES)  // 16 bytes
 
 // Paket boyutundan PRBS boyutunu hesapla
 #if VLAN_ENABLED

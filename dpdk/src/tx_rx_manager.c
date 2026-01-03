@@ -848,8 +848,8 @@ int tx_worker(void *arg)
     printf("TX Worker started: Port %u, Queue %u, Lcore %u, VLAN %u, VL_RANGE [%u..%u)\n",
            params->port_id, params->queue_id, params->lcore_id, params->vlan_id, vl_start, vl_end);
 #if IMIX_ENABLED
-    printf("  *** IMIX MODE ENABLED - Variable packet sizes ***\n");
-    printf("  -> IMIX pattern: 100, 200, 400, 800, 1200x3, 1518x3 (avg=%lu bytes)\n", avg_bytes_per_packet);
+    printf("  *** IMIX MODE ENABLED - 32 sizes, 64 packets ***\n");
+    printf("  -> IMIX pattern: 70x3..1518x1 (avg=%lu bytes)\n", avg_bytes_per_packet);
     printf("  -> Worker offset: %u (hybrid shuffle)\n", imix_offset);
 #else
     printf("  *** SMOOTH PACING - 1 saniyeye yayılmış trafik ***\n");

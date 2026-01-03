@@ -56,26 +56,84 @@
 // RAW SOCKET IMIX SUPPORT
 // ==========================================
 // Raw socket IMIX: VLAN yok, ETH(14) + IP(20) + UDP(8) = 42 byte header
-// Minimum: 100 - 4 (no VLAN) = 96 byte raw socket packet
-// Maximum: 1518 - 4 (no VLAN) = 1514 byte raw socket packet
+// Her boyut DPDK boyutundan 4 byte küçük (VLAN header yok)
+// Minimum: 70 - 4 = 66 byte raw socket packet
+// Maximum: 1518 - 4 = 1514 byte raw socket packet
 
-#define RAW_IMIX_SIZE_1    96     // 100 - 4 (no VLAN)
-#define RAW_IMIX_SIZE_2    196    // 200 - 4
-#define RAW_IMIX_SIZE_3    396    // 400 - 4
-#define RAW_IMIX_SIZE_4    796    // 800 - 4
-#define RAW_IMIX_SIZE_5    1196   // 1200 - 4
-#define RAW_IMIX_SIZE_6    1514   // 1518 - 4 (max without VLAN)
+// x3 katsayılı boyutlar (her biri 3 kez) - DPDK boyutu - 4
+#define RAW_IMIX_SIZE_01    66     // 70 - 4
+#define RAW_IMIX_SIZE_02    101    // 105 - 4
+#define RAW_IMIX_SIZE_03    191    // 195 - 4
+#define RAW_IMIX_SIZE_04    211    // 215 - 4
+#define RAW_IMIX_SIZE_05    281    // 285 - 4
+#define RAW_IMIX_SIZE_06    321    // 325 - 4
+#define RAW_IMIX_SIZE_07    371    // 375 - 4
+#define RAW_IMIX_SIZE_08    431    // 435 - 4
+#define RAW_IMIX_SIZE_09    461    // 465 - 4
+#define RAW_IMIX_SIZE_10    441    // 445 - 4
+#define RAW_IMIX_SIZE_11    451    // 455 - 4
 
-#define RAW_IMIX_AVG_PACKET_SIZE 960  // Yaklaşık ortalama
+// x2 katsayılı boyutlar (her biri 2 kez) - DPDK boyutu - 4
+#define RAW_IMIX_SIZE_12    501    // 505 - 4
+#define RAW_IMIX_SIZE_13    591    // 595 - 4
+#define RAW_IMIX_SIZE_14    611    // 615 - 4
+#define RAW_IMIX_SIZE_15    681    // 685 - 4
+#define RAW_IMIX_SIZE_16    721    // 725 - 4
+#define RAW_IMIX_SIZE_17    771    // 775 - 4
+#define RAW_IMIX_SIZE_18    831    // 835 - 4
+#define RAW_IMIX_SIZE_19    861    // 865 - 4
+#define RAW_IMIX_SIZE_20    941    // 945 - 4
+#define RAW_IMIX_SIZE_21    951    // 955 - 4
+
+// x1 katsayılı boyutlar (her biri 1 kez) - DPDK boyutu - 4
+#define RAW_IMIX_SIZE_22    1011   // 1015 - 4
+#define RAW_IMIX_SIZE_23    1081   // 1085 - 4
+#define RAW_IMIX_SIZE_24    1121   // 1125 - 4
+#define RAW_IMIX_SIZE_25    1171   // 1175 - 4
+#define RAW_IMIX_SIZE_26    1231   // 1235 - 4
+#define RAW_IMIX_SIZE_27    1261   // 1265 - 4
+#define RAW_IMIX_SIZE_28    1341   // 1345 - 4
+#define RAW_IMIX_SIZE_29    1361   // 1365 - 4
+#define RAW_IMIX_SIZE_30    1401   // 1405 - 4
+#define RAW_IMIX_SIZE_31    1491   // 1495 - 4
+#define RAW_IMIX_SIZE_32    1514   // 1518 - 4 (max without VLAN)
+
+// Raw IMIX ortalama paket boyutu (DPDK ortalama - 4)
+// (39138 - 64*4) / 64 = 38882 / 64 ≈ 608
+#define RAW_IMIX_AVG_PACKET_SIZE 608
 
 // PRBS offset hesabı için maksimum boyut (VLAN'lı DPDK ile uyumlu)
 #define RAW_MAX_PRBS_BYTES RAW_PKT_PRBS_BYTES  // 1459
 
-// Raw IMIX pattern (VLAN'sız boyutlar)
+// Raw IMIX pattern (64 paketlik - VLAN'sız boyutlar)
 #define RAW_IMIX_PATTERN_INIT { \
-    RAW_IMIX_SIZE_1, RAW_IMIX_SIZE_2, RAW_IMIX_SIZE_3, RAW_IMIX_SIZE_4, \
-    RAW_IMIX_SIZE_5, RAW_IMIX_SIZE_5, RAW_IMIX_SIZE_5, \
-    RAW_IMIX_SIZE_6, RAW_IMIX_SIZE_6, RAW_IMIX_SIZE_6 \
+    /* x3 boyutlar (33 paket) */ \
+    RAW_IMIX_SIZE_01, RAW_IMIX_SIZE_01, RAW_IMIX_SIZE_01, \
+    RAW_IMIX_SIZE_02, RAW_IMIX_SIZE_02, RAW_IMIX_SIZE_02, \
+    RAW_IMIX_SIZE_03, RAW_IMIX_SIZE_03, RAW_IMIX_SIZE_03, \
+    RAW_IMIX_SIZE_04, RAW_IMIX_SIZE_04, RAW_IMIX_SIZE_04, \
+    RAW_IMIX_SIZE_05, RAW_IMIX_SIZE_05, RAW_IMIX_SIZE_05, \
+    RAW_IMIX_SIZE_06, RAW_IMIX_SIZE_06, RAW_IMIX_SIZE_06, \
+    RAW_IMIX_SIZE_07, RAW_IMIX_SIZE_07, RAW_IMIX_SIZE_07, \
+    RAW_IMIX_SIZE_08, RAW_IMIX_SIZE_08, RAW_IMIX_SIZE_08, \
+    RAW_IMIX_SIZE_09, RAW_IMIX_SIZE_09, RAW_IMIX_SIZE_09, \
+    RAW_IMIX_SIZE_10, RAW_IMIX_SIZE_10, RAW_IMIX_SIZE_10, \
+    RAW_IMIX_SIZE_11, RAW_IMIX_SIZE_11, RAW_IMIX_SIZE_11, \
+    /* x2 boyutlar (20 paket) */ \
+    RAW_IMIX_SIZE_12, RAW_IMIX_SIZE_12, \
+    RAW_IMIX_SIZE_13, RAW_IMIX_SIZE_13, \
+    RAW_IMIX_SIZE_14, RAW_IMIX_SIZE_14, \
+    RAW_IMIX_SIZE_15, RAW_IMIX_SIZE_15, \
+    RAW_IMIX_SIZE_16, RAW_IMIX_SIZE_16, \
+    RAW_IMIX_SIZE_17, RAW_IMIX_SIZE_17, \
+    RAW_IMIX_SIZE_18, RAW_IMIX_SIZE_18, \
+    RAW_IMIX_SIZE_19, RAW_IMIX_SIZE_19, \
+    RAW_IMIX_SIZE_20, RAW_IMIX_SIZE_20, \
+    RAW_IMIX_SIZE_21, RAW_IMIX_SIZE_21, \
+    /* x1 boyutlar (11 paket) */ \
+    RAW_IMIX_SIZE_22, RAW_IMIX_SIZE_23, RAW_IMIX_SIZE_24, RAW_IMIX_SIZE_25, \
+    RAW_IMIX_SIZE_26, RAW_IMIX_SIZE_27, RAW_IMIX_SIZE_28, RAW_IMIX_SIZE_29, \
+    RAW_IMIX_SIZE_30, RAW_IMIX_SIZE_31, RAW_IMIX_SIZE_32 \
 }
 
 // Maximum VL-ID for array sizing

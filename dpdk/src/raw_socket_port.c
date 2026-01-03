@@ -228,7 +228,11 @@ void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rat
     // Calculate smooth pacing parameters
     // bytes_per_sec = rate_mbps * 1000000 / 8
     uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL;
+#if IMIX_ENABLED
+    uint64_t packets_per_sec = bytes_per_sec / RAW_IMIX_AVG_PACKET_SIZE;
+#else
     uint64_t packets_per_sec = bytes_per_sec / RAW_PKT_TOTAL_SIZE;
+#endif
 
     if (packets_per_sec > 0) {
         // delay_ns = 1 second in ns / packets_per_sec
@@ -368,6 +372,7 @@ int init_raw_prbs_cache(struct raw_socket_port *port)
 // PACKET BUILDING
 // ==========================================
 
+// Legacy build_raw_packet (sabit boyut için geriye uyumluluk)
 int build_raw_packet(uint8_t *buffer, const uint8_t *src_mac,
                      uint16_t vl_id, uint64_t sequence, const uint8_t *prbs_data)
 {
@@ -432,6 +437,92 @@ int build_raw_packet(uint8_t *buffer, const uint8_t *src_mac,
 
     return RAW_PKT_TOTAL_SIZE;
 }
+
+#if IMIX_ENABLED
+// IMIX: Dinamik boyutlu paket oluştur
+int build_raw_packet_dynamic(uint8_t *buffer, const uint8_t *src_mac,
+                              uint16_t vl_id, uint64_t sequence,
+                              const uint8_t *prbs_data, uint16_t prbs_len,
+                              uint16_t pkt_size)
+{
+    static const uint8_t fixed_src_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x20};
+    (void)src_mac;
+
+    // Ethernet Header
+    buffer[0] = 0x03;
+    buffer[1] = 0x00;
+    buffer[2] = 0x00;
+    buffer[3] = 0x00;
+    buffer[4] = (vl_id >> 8) & 0xFF;
+    buffer[5] = vl_id & 0xFF;
+    memcpy(buffer + 6, fixed_src_mac, 6);
+    buffer[12] = 0x08;
+    buffer[13] = 0x00;
+
+    // IPv4 Header (dinamik total_length)
+    uint8_t *ip = buffer + RAW_PKT_ETH_HDR_SIZE;
+    uint16_t payload_size = pkt_size - RAW_PKT_ETH_HDR_SIZE - RAW_PKT_IP_HDR_SIZE - RAW_PKT_UDP_HDR_SIZE;
+    uint16_t ip_total_len = RAW_PKT_IP_HDR_SIZE + RAW_PKT_UDP_HDR_SIZE + payload_size;
+
+    ip[0] = 0x45;
+    ip[1] = 0x00;
+    ip[2] = (ip_total_len >> 8) & 0xFF;
+    ip[3] = ip_total_len & 0xFF;
+    ip[4] = 0x00;
+    ip[5] = 0x00;
+    ip[6] = 0x40;
+    ip[7] = 0x00;
+    ip[8] = 0x01;
+    ip[9] = 0x11;
+    ip[10] = 0x00;
+    ip[11] = 0x00;
+    ip[12] = 0x0A;
+    ip[13] = 0x00;
+    ip[14] = 0x00;
+    ip[15] = 0x00;
+    ip[16] = 0xE0;
+    ip[17] = 0xE0;
+    ip[18] = (vl_id >> 8) & 0xFF;
+    ip[19] = vl_id & 0xFF;
+
+    // IP Checksum
+    uint16_t ip_checksum = calculate_ip_checksum_raw(ip);
+    ip[10] = (ip_checksum >> 8) & 0xFF;
+    ip[11] = ip_checksum & 0xFF;
+
+    // UDP Header (dinamik dgram_len)
+    uint8_t *udp = ip + RAW_PKT_IP_HDR_SIZE;
+    udp[0] = 0x00;
+    udp[1] = 0x64;
+    udp[2] = 0x00;
+    udp[3] = 0x64;
+    uint16_t udp_len = RAW_PKT_UDP_HDR_SIZE + payload_size;
+    udp[4] = (udp_len >> 8) & 0xFF;
+    udp[5] = udp_len & 0xFF;
+    udp[6] = 0x00;
+    udp[7] = 0x00;
+
+    // Payload (dinamik PRBS boyutu)
+    uint8_t *payload = udp + RAW_PKT_UDP_HDR_SIZE;
+    memcpy(payload, &sequence, RAW_PKT_SEQ_BYTES);
+    memcpy(payload + RAW_PKT_SEQ_BYTES, prbs_data, prbs_len);
+
+    return pkt_size;
+}
+
+// IMIX paket boyutu al (raw socket için - VLAN'sız)
+static inline uint16_t get_raw_imix_packet_size(uint64_t pkt_counter, uint8_t worker_offset)
+{
+    static const uint16_t raw_imix_pattern[IMIX_PATTERN_SIZE] = RAW_IMIX_PATTERN_INIT;
+    return raw_imix_pattern[(pkt_counter + worker_offset) % IMIX_PATTERN_SIZE];
+}
+
+// Raw IMIX PRBS boyutu hesapla
+static inline uint16_t calc_raw_prbs_size(uint16_t pkt_size)
+{
+    return pkt_size - RAW_PKT_ETH_HDR_SIZE - RAW_PKT_IP_HDR_SIZE - RAW_PKT_UDP_HDR_SIZE - RAW_PKT_SEQ_BYTES;
+}
+#endif /* IMIX_ENABLED */
 
 // ==========================================
 // SOCKET INITIALIZATION
@@ -891,11 +982,21 @@ int init_raw_socket_ports(void)
 void *raw_tx_worker(void *arg)
 {
     struct raw_socket_port *port = (struct raw_socket_port *)arg;
-    uint8_t packet_buffer[RAW_PKT_TOTAL_SIZE];
+    uint8_t packet_buffer[RAW_PKT_TOTAL_SIZE];  // Max boyut
     bool first_tx[MAX_RAW_TARGETS] = {false};
 
+#if IMIX_ENABLED
+    // IMIX: Worker offset (her target için farklı pattern başlangıcı)
+    uint8_t imix_offset = (uint8_t)(port->port_id % IMIX_PATTERN_SIZE);
+    uint64_t imix_counter = 0;
+    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING)\n",
+           port->port_id, port->tx_target_count);
+    printf("[Port %u TX] IMIX pattern: 96, 196, 396, 796, 1196x3, 1514x3 (avg=%d bytes)\n",
+           port->port_id, RAW_IMIX_AVG_PACKET_SIZE);
+#else
     printf("[Port %u TX Worker] Started with %u targets (SMOOTH PACING)\n",
            port->port_id, port->tx_target_count);
+#endif
 
     port->tx_running = true;
 
@@ -932,12 +1033,28 @@ void *raw_tx_worker(void *arg)
                 uint64_t seq = target->vl_sequences[vl_index].tx_sequence++;
                 pthread_spin_unlock(&target->vl_sequences[vl_index].tx_lock);
 
+#if IMIX_ENABLED
+                // IMIX: Paket boyutunu pattern'den al
+                uint16_t pkt_size = get_raw_imix_packet_size(imix_counter, imix_offset);
+                uint16_t prbs_len = calc_raw_prbs_size(pkt_size);
+                imix_counter++;
+
+                // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
+                uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+                uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
+
+                // Build packet (dinamik boyut)
+                build_raw_packet_dynamic(packet_buffer, port->mac_addr, vl_id, seq,
+                                          prbs_data, prbs_len, pkt_size);
+#else
                 // Get PRBS data
                 uint64_t prbs_offset = (seq * (uint64_t)RAW_PKT_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
                 uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
 
                 // Build packet
                 build_raw_packet(packet_buffer, port->mac_addr, vl_id, seq, prbs_data);
+                uint16_t pkt_size = RAW_PKT_TOTAL_SIZE;
+#endif
 
                 // Get TX frame from ring
                 struct tpacket2_hdr *hdr = (struct tpacket2_hdr *)(
@@ -962,16 +1079,16 @@ void *raw_tx_worker(void *arg)
                     }
                 }
 
-                // Copy packet to ring buffer
+                // Copy packet to ring buffer (dinamik boyut)
                 uint8_t *frame_data = (uint8_t *)hdr + TPACKET2_HDRLEN - sizeof(struct sockaddr_ll);
-                memcpy(frame_data, packet_buffer, RAW_PKT_TOTAL_SIZE);
-                hdr->tp_len = RAW_PKT_TOTAL_SIZE;
+                memcpy(frame_data, packet_buffer, pkt_size);
+                hdr->tp_len = pkt_size;
                 hdr->tp_status = TP_STATUS_SEND_REQUEST;
 
                 // Update stats
                 pthread_spin_lock(&target->stats.lock);
                 target->stats.tx_packets++;
-                target->stats.tx_bytes += RAW_PKT_TOTAL_SIZE;
+                target->stats.tx_bytes += pkt_size;
                 pthread_spin_unlock(&target->stats.lock);
 
                 if (!first_tx[t]) {
@@ -1361,6 +1478,30 @@ void *raw_rx_worker(void *arg)
         // PRBS verification
         if (partner && partner->prbs_initialized) {
             uint8_t *recv_prbs = payload + RAW_PKT_SEQ_BYTES;
+
+#if IMIX_ENABLED
+            // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
+            // PRBS boyutu paket boyutundan hesaplanır
+            uint16_t prbs_len = pkt_len - RAW_PKT_ETH_HDR_SIZE - RAW_PKT_IP_HDR_SIZE -
+                                RAW_PKT_UDP_HDR_SIZE - RAW_PKT_SEQ_BYTES;
+            if (prbs_len > RAW_MAX_PRBS_BYTES) prbs_len = RAW_MAX_PRBS_BYTES;
+
+            uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+            uint8_t *expected_prbs = partner->prbs_cache_ext + prbs_offset;
+
+            if (memcmp(recv_prbs, expected_prbs, prbs_len) == 0) {
+                pthread_spin_lock(&source->stats.lock);
+                source->stats.good_pkts++;
+                pthread_spin_unlock(&source->stats.lock);
+            } else {
+                pthread_spin_lock(&source->stats.lock);
+                source->stats.bad_pkts++;
+                for (uint16_t i = 0; i < prbs_len; i++) {
+                    source->stats.bit_errors += __builtin_popcount(recv_prbs[i] ^ expected_prbs[i]);
+                }
+                pthread_spin_unlock(&source->stats.lock);
+            }
+#else
             uint64_t prbs_offset = (seq * (uint64_t)RAW_PKT_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
             uint8_t *expected_prbs = partner->prbs_cache_ext + prbs_offset;
 
@@ -1376,6 +1517,7 @@ void *raw_rx_worker(void *arg)
                 }
                 pthread_spin_unlock(&source->stats.lock);
             }
+#endif
         }
 
         hdr->tp_status = TP_STATUS_KERNEL;
@@ -1733,12 +1875,17 @@ void *multi_queue_rx_worker(void *arg)
 
             if (partner && partner->prbs_initialized && partner->prbs_cache_ext) {
                 uint8_t *recv_prbs = payload + RAW_PKT_SEQ_BYTES;
+#if IMIX_ENABLED
+                // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
+                uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+#else
                 uint64_t prbs_offset = (seq * (uint64_t)RAW_PKT_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+#endif
                 uint8_t *expected_prbs = partner->prbs_cache_ext + prbs_offset;
 
                 uint16_t cmp_bytes = pkt_len - RAW_PKT_ETH_HDR_SIZE - RAW_PKT_IP_HDR_SIZE -
                                      RAW_PKT_UDP_HDR_SIZE - RAW_PKT_SEQ_BYTES;
-                if (cmp_bytes > RAW_PKT_PRBS_BYTES) cmp_bytes = RAW_PKT_PRBS_BYTES;
+                if (cmp_bytes > RAW_MAX_PRBS_BYTES) cmp_bytes = RAW_MAX_PRBS_BYTES;
 
                 pthread_spin_lock(&source->stats.lock);
                 if (memcmp(recv_prbs, expected_prbs, cmp_bytes) == 0) {

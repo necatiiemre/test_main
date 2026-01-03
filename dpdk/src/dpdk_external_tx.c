@@ -195,6 +195,12 @@ int dpdk_ext_tx_worker(void *arg)
     // VLAN header length
     const uint16_t l2_len = sizeof(struct rte_ether_hdr) + 4; // +4 for VLAN tag
 
+#if IMIX_ENABLED
+    // IMIX: Worker-specific offset for pattern rotation
+    const uint8_t imix_offset = (uint8_t)((params->port_id * 4 + params->queue_id) % IMIX_PATTERN_SIZE);
+    uint64_t imix_counter = 0;
+#endif
+
     // Find port index and config for multi-target handling
     int port_idx = -1;
     struct dpdk_ext_tx_port_config *port_config = NULL;
@@ -245,7 +251,11 @@ int dpdk_ext_tx_worker(void *arg)
         return -1;
     }
 
-    const uint64_t pkt_size = PACKET_SIZE_VLAN;
+#if IMIX_ENABLED
+    const uint64_t avg_pkt_size = IMIX_AVG_PACKET_SIZE;
+#else
+    const uint64_t avg_pkt_size = PACKET_SIZE_VLAN;
+#endif
 
     // ==========================================
     // PURE TIMESTAMP-BASED PACING (1 saniyeye yayılmış smooth trafik)
@@ -259,8 +269,9 @@ int dpdk_ext_tx_worker(void *arg)
     uint64_t tsc_hz = rte_get_tsc_hz();
 
     // Hassas hesaplama: rate_mbps -> bytes/sec -> packets/sec -> cycles/packet
+    // IMIX: Ortalama paket boyutu kullan
     uint64_t bytes_per_sec = (uint64_t)params->rate_mbps * 125000ULL;  // Mbit/s -> bytes/s
-    uint64_t packets_per_sec = bytes_per_sec / pkt_size;
+    uint64_t packets_per_sec = bytes_per_sec / avg_pkt_size;
     uint64_t delay_cycles = (packets_per_sec > 0) ? (tsc_hz / packets_per_sec) : tsc_hz;
 
     // Mikrosaniye cinsinden paket arası süre (debug için)
@@ -273,7 +284,13 @@ int dpdk_ext_tx_worker(void *arg)
 
     printf("ExtTX Worker started: Port %u Q%u, %u targets, Rate %u Mbps\n",
            params->port_id, params->queue_id, target_count, params->rate_mbps);
+#if IMIX_ENABLED
+    printf("  *** IMIX MODE + SMOOTH PACING ***\n");
+    printf("  -> IMIX pattern: 100, 200, 400, 800, 1200x3, 1518x3 (avg=%lu bytes)\n", avg_pkt_size);
+    printf("  -> Worker offset: %u (hybrid shuffle)\n", imix_offset);
+#else
     printf("  *** SMOOTH PACING - 1 saniyeye yayılmış trafik ***\n");
+#endif
     for (int t = 0; t < target_count; t++) {
         struct dpdk_ext_tx_target *target = &port_config->targets[t];
         printf("  Target %d: VLAN %u, VL-ID [%u..%u)\n",
@@ -359,8 +376,20 @@ int dpdk_ext_tx_worker(void *arg)
         *(uint16_t *)vlan_tag = rte_cpu_to_be_16(vlan_tci);
         *(uint16_t *)(vlan_tag + 2) = rte_cpu_to_be_16(0x0800); // IPv4
 
+#if IMIX_ENABLED
+        // IMIX: Paket boyutunu pattern'den al
+        uint16_t pkt_size = get_imix_packet_size(imix_counter, imix_offset);
+        uint16_t prbs_len = calc_prbs_size(pkt_size);
+        uint16_t payload_size = pkt_size - l2_len - sizeof(struct rte_ipv4_hdr) - sizeof(struct rte_udp_hdr);
+        imix_counter++;
+#else
+        const uint16_t pkt_size = PACKET_SIZE_VLAN;
+        const uint16_t prbs_len = NUM_PRBS_BYTES;
+        const uint16_t payload_size = PAYLOAD_SIZE_VLAN;
+#endif
+
         // ==========================================
-        // BUILD IP HEADER
+        // BUILD IP HEADER (dinamik total_length)
         // ==========================================
         struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(pkt + l2_len);
         ip->version_ihl = 0x45;
@@ -378,12 +407,12 @@ int dpdk_ext_tx_worker(void *arg)
         ip->hdr_checksum = rte_ipv4_cksum(ip);
 
         // ==========================================
-        // BUILD UDP HEADER
+        // BUILD UDP HEADER (dinamik dgram_len)
         // ==========================================
         struct rte_udp_hdr *udp = (struct rte_udp_hdr *)(pkt + l2_len + sizeof(struct rte_ipv4_hdr));
         udp->src_port = rte_cpu_to_be_16(100);
         udp->dst_port = rte_cpu_to_be_16(100);
-        udp->dgram_len = rte_cpu_to_be_16(pkt_size - l2_len - sizeof(struct rte_ipv4_hdr));
+        udp->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) + payload_size);
         udp->dgram_cksum = 0;
 
         // ==========================================
@@ -394,11 +423,16 @@ int dpdk_ext_tx_worker(void *arg)
         // Sequence number (8 bytes)
         *(uint64_t *)payload = seq;
 
-        // PRBS data
+        // PRBS data (IMIX: offset hep MAX ile hesaplanır, boyut dinamik)
+#if IMIX_ENABLED
+        uint64_t prbs_offset = (seq * (uint64_t)MAX_PRBS_BYTES) % PRBS_CACHE_SIZE;
+        memcpy(payload + 8, prbs_cache_ext + prbs_offset, prbs_len);
+#else
         uint64_t prbs_offset = (seq * (uint64_t)NUM_PRBS_BYTES) % PRBS_CACHE_SIZE;
         memcpy(payload + 8, prbs_cache_ext + prbs_offset, NUM_PRBS_BYTES);
+#endif
 
-        // Set packet length
+        // Set packet length (dinamik)
         m->data_len = pkt_size;
         m->pkt_len = pkt_size;
 
@@ -412,7 +446,7 @@ int dpdk_ext_tx_worker(void *arg)
 
         if (nb_tx > 0) {
             local_tx_pkts++;
-            local_tx_bytes += pkt_size;
+            local_tx_bytes += pkt_size;  // Dinamik boyut kullan
         } else {
             rte_pktmbuf_free(pkts[0]);
         }

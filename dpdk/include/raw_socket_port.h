@@ -44,13 +44,39 @@
 #define RAW_PKT_ETH_HDR_SIZE   14
 #define RAW_PKT_IP_HDR_SIZE    20
 #define RAW_PKT_UDP_HDR_SIZE   8
-#define RAW_PKT_PAYLOAD_SIZE   1467   // 8 seq + 1459 prbs
+#define RAW_PKT_PAYLOAD_SIZE   1467   // 8 seq + 1459 prbs (max size)
 #define RAW_PKT_TOTAL_SIZE     (RAW_PKT_ETH_HDR_SIZE + RAW_PKT_IP_HDR_SIZE + \
                                 RAW_PKT_UDP_HDR_SIZE + RAW_PKT_PAYLOAD_SIZE)
 
 // PRBS data size in payload
 #define RAW_PKT_SEQ_BYTES      8
 #define RAW_PKT_PRBS_BYTES     (RAW_PKT_PAYLOAD_SIZE - RAW_PKT_SEQ_BYTES)
+
+// ==========================================
+// RAW SOCKET IMIX SUPPORT
+// ==========================================
+// Raw socket IMIX: VLAN yok, ETH(14) + IP(20) + UDP(8) = 42 byte header
+// Minimum: 100 - 4 (no VLAN) = 96 byte raw socket packet
+// Maximum: 1518 - 4 (no VLAN) = 1514 byte raw socket packet
+
+#define RAW_IMIX_SIZE_1    96     // 100 - 4 (no VLAN)
+#define RAW_IMIX_SIZE_2    196    // 200 - 4
+#define RAW_IMIX_SIZE_3    396    // 400 - 4
+#define RAW_IMIX_SIZE_4    796    // 800 - 4
+#define RAW_IMIX_SIZE_5    1196   // 1200 - 4
+#define RAW_IMIX_SIZE_6    1514   // 1518 - 4 (max without VLAN)
+
+#define RAW_IMIX_AVG_PACKET_SIZE 960  // Yaklaşık ortalama
+
+// PRBS offset hesabı için maksimum boyut (VLAN'lı DPDK ile uyumlu)
+#define RAW_MAX_PRBS_BYTES RAW_PKT_PRBS_BYTES  // 1459
+
+// Raw IMIX pattern (VLAN'sız boyutlar)
+#define RAW_IMIX_PATTERN_INIT { \
+    RAW_IMIX_SIZE_1, RAW_IMIX_SIZE_2, RAW_IMIX_SIZE_3, RAW_IMIX_SIZE_4, \
+    RAW_IMIX_SIZE_5, RAW_IMIX_SIZE_5, RAW_IMIX_SIZE_5, \
+    RAW_IMIX_SIZE_6, RAW_IMIX_SIZE_6, RAW_IMIX_SIZE_6 \
+}
 
 // Maximum VL-ID for array sizing
 #define MAX_TOTAL_VL_IDS       4096

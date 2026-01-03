@@ -195,7 +195,12 @@ static void init_rate_limiter(struct rate_limiter *limiter,
     limiter->max_tokens = limiter->tokens_per_sec / 10000;
 
     // Minimum bucket size to allow at least one burst
+    // IMIX: Ortalama paket boyutu kullan
+#if IMIX_ENABLED
+    uint64_t min_bucket = BURST_SIZE * IMIX_AVG_PACKET_SIZE * 2;
+#else
     uint64_t min_bucket = BURST_SIZE * PACKET_SIZE * 2;
+#endif
     if (limiter->max_tokens < min_bucket) {
         limiter->max_tokens = min_bucket;
     }
@@ -811,7 +816,11 @@ int tx_worker(void *arg)
     const uint16_t vl_end = get_tx_vl_id_range_end(params->port_id, params->queue_id);
     const uint16_t vl_range_size = get_vl_id_range_size(); // Her zaman 128
 
-    const uint64_t bytes_per_packet = PACKET_SIZE;
+#if IMIX_ENABLED
+    // IMIX: Worker-specific offset for pattern rotation (hybrid shuffle)
+    const uint8_t imix_offset = (uint8_t)((params->port_id * 4 + params->queue_id) % IMIX_PATTERN_SIZE);
+    uint64_t imix_counter = 0;  // Paket sayacı (IMIX pattern için)
+#endif
 
     // ==========================================
     // SMOOTH PACING SETUP (1 saniyeye yayılmış trafik)
@@ -819,8 +828,13 @@ int tx_worker(void *arg)
     uint64_t tsc_hz = rte_get_tsc_hz();
 
     // Rate hesaplama: limiter.tokens_per_sec zaten bytes/sec
-    // packets_per_sec = bytes_per_sec / packet_size
-    uint64_t packets_per_sec = params->limiter.tokens_per_sec / bytes_per_packet;
+    // IMIX: Ortalama paket boyutu kullanarak packets_per_sec hesapla
+#if IMIX_ENABLED
+    const uint64_t avg_bytes_per_packet = IMIX_AVG_PACKET_SIZE;
+#else
+    const uint64_t avg_bytes_per_packet = PACKET_SIZE;
+#endif
+    uint64_t packets_per_sec = params->limiter.tokens_per_sec / avg_bytes_per_packet;
     uint64_t delay_cycles = (packets_per_sec > 0) ? (tsc_hz / packets_per_sec) : tsc_hz;
 
     // Mikrosaniye cinsinden paket arası süre
@@ -833,7 +847,13 @@ int tx_worker(void *arg)
 
     printf("TX Worker started: Port %u, Queue %u, Lcore %u, VLAN %u, VL_RANGE [%u..%u)\n",
            params->port_id, params->queue_id, params->lcore_id, params->vlan_id, vl_start, vl_end);
+#if IMIX_ENABLED
+    printf("  *** IMIX MODE ENABLED - Variable packet sizes ***\n");
+    printf("  -> IMIX pattern: 100, 200, 400, 800, 1200x3, 1518x3 (avg=%lu bytes)\n", avg_bytes_per_packet);
+    printf("  -> Worker offset: %u (hybrid shuffle)\n", imix_offset);
+#else
     printf("  *** SMOOTH PACING - 1 saniyeye yayılmış trafik ***\n");
+#endif
     printf("  -> Pacing: %.1f us/paket (%.0f paket/s), stagger=%ums\n",
            inter_packet_us, (double)packets_per_sec, (unsigned)(stagger_offset * 1000 / tsc_hz));
     printf("  VL-ID Based Sequence: Each VL-ID has independent sequence counter\n");
@@ -939,8 +959,19 @@ int tx_worker(void *arg)
                                 ((uint32_t)((curr_vl >> 8) & 0xFF) << 8) |
                                 (uint32_t)(curr_vl & 0xFF));
 
+#if IMIX_ENABLED
+        // IMIX: Paket boyutunu pattern'den al
+        uint16_t pkt_size = get_imix_packet_size(imix_counter, imix_offset);
+        uint16_t prbs_len = calc_prbs_size(pkt_size);
+        imix_counter++;
+
+        // Dinamik boyutlu paket oluştur
+        build_packet_dynamic(pkt, &cfg, pkt_size);
+        fill_payload_with_prbs31_dynamic(pkt, params->port_id, seq, l2_len, prbs_len);
+#else
         build_packet_mbuf(pkt, &cfg);
         fill_payload_with_prbs31(pkt, params->port_id, seq, l2_len);
+#endif
 
         // Tek paket gönder
         uint16_t nb_tx = rte_eth_tx_burst(params->port_id, params->queue_id, &pkt, 1);
@@ -1133,8 +1164,13 @@ int rx_worker(void *arg)
                     }
 
                     // Minimum length check for raw socket packets
-                    // ETH(14) + IP(20) + UDP(8) + SEQ(8) + PRBS(1459) = 1509
-                    if (unlikely(m->pkt_len < (uint32_t)(l2_len_novlan + 20 + 8 + RAW_PKT_SEQ_BYTES + RAW_PKT_PRBS_BYTES)))
+                    // IMIX minimum: ETH(14) + IP(20) + UDP(8) + SEQ(8) + MIN_PRBS = 100 bytes
+#if IMIX_ENABLED
+                    const uint32_t min_raw_pkt_len = IMIX_MIN_PACKET_SIZE - VLAN_HDR_SIZE;  // Raw socket has no VLAN
+#else
+                    const uint32_t min_raw_pkt_len = l2_len_novlan + 20 + 8 + RAW_PKT_SEQ_BYTES + RAW_PKT_PRBS_BYTES;
+#endif
+                    if (unlikely(m->pkt_len < min_raw_pkt_len))
                     {
                         local_short++;
                         continue;
@@ -1154,6 +1190,31 @@ int rx_worker(void *arg)
                         // Get sequence number from payload
                         uint64_t raw_seq = *(uint64_t *)(pkt + raw_payload_off);
 
+#if IMIX_ENABLED
+                        // IMIX: PRBS offset hesabı HEP MAX_PRBS_BYTES ile yapılır
+                        // PRBS boyutu paket boyutundan hesaplanır
+                        uint16_t raw_prbs_len = m->pkt_len - l2_len_novlan - 20 - 8 - RAW_PKT_SEQ_BYTES;
+                        if (raw_prbs_len > MAX_PRBS_BYTES) raw_prbs_len = MAX_PRBS_BYTES;
+
+                        uint64_t prbs_offset = (raw_seq * (uint64_t)MAX_PRBS_BYTES) % 268435456ULL;
+                        uint8_t *expected_prbs = raw_port->prbs_cache_ext + prbs_offset;
+                        uint8_t *recv_prbs = pkt + raw_payload_off + RAW_PKT_SEQ_BYTES;
+
+                        // Compare PRBS data (dinamik boyut)
+                        if (memcmp(recv_prbs, expected_prbs, raw_prbs_len) == 0)
+                        {
+                            local_good++;
+                        }
+                        else
+                        {
+                            local_bad++;
+                            // Count bit errors
+                            for (uint32_t b = 0; b < raw_prbs_len; b++)
+                            {
+                                local_bits += __builtin_popcount(recv_prbs[b] ^ expected_prbs[b]);
+                            }
+                        }
+#else
                         // Calculate PRBS offset (same formula as raw_socket_port.c)
                         // RAW_PRBS_CACHE_SIZE = 268435456 (256MB)
                         uint64_t prbs_offset = (raw_seq * (uint64_t)RAW_PKT_PRBS_BYTES) % 268435456ULL;
@@ -1174,6 +1235,7 @@ int rx_worker(void *arg)
                                 local_bits += __builtin_popcount(recv_prbs[b] ^ expected_prbs[b]);
                             }
                         }
+#endif
 
                         // Sequence tracking for raw socket packets
                         if (raw_vl_id <= MAX_VL_ID)
@@ -1227,7 +1289,12 @@ int rx_worker(void *arg)
                 // ==========================================
                 // VLAN PACKET (from DPDK ports) - process normally
                 // ==========================================
+#if IMIX_ENABLED
+                // IMIX minimum: 100 bytes
+                if (unlikely(m->pkt_len < IMIX_MIN_PACKET_SIZE))
+#else
                 if (unlikely(m->pkt_len < min_len_vlan))
+#endif
                 {
                     local_short++;
                     continue;
@@ -1255,6 +1322,31 @@ int rx_worker(void *arg)
                         // Get sequence number from payload
                         uint64_t ext_seq = *(uint64_t *)(pkt + payload_off);
 
+#if IMIX_ENABLED
+                        // IMIX: PRBS offset hesabı HEP MAX_PRBS_BYTES ile yapılır
+                        // PRBS boyutu paket boyutundan hesaplanır
+                        uint16_t ext_prbs_len = m->pkt_len - l2_len_vlan - 20 - 8 - SEQ_BYTES;
+                        if (ext_prbs_len > MAX_PRBS_BYTES) ext_prbs_len = MAX_PRBS_BYTES;
+
+                        uint64_t prbs_offset = (ext_seq * (uint64_t)MAX_PRBS_BYTES) % 268435456ULL;
+                        uint8_t *expected_prbs = raw_port->prbs_cache_ext + prbs_offset;
+                        uint8_t *recv_prbs = pkt + payload_off + SEQ_BYTES;
+
+                        // Compare PRBS data (dinamik boyut)
+                        if (memcmp(recv_prbs, expected_prbs, ext_prbs_len) == 0)
+                        {
+                            local_good++;
+                        }
+                        else
+                        {
+                            local_bad++;
+                            // Count bit errors
+                            for (uint32_t i = 0; i < ext_prbs_len; i++)
+                            {
+                                local_bits += __builtin_popcount(recv_prbs[i] ^ expected_prbs[i]);
+                            }
+                        }
+#else
                         // Calculate PRBS offset (same formula as raw_socket_port.c)
                         // RAW_PRBS_CACHE_SIZE = 268435456 (256MB)
                         uint64_t prbs_offset = (ext_seq * (uint64_t)RAW_PKT_PRBS_BYTES) % 268435456ULL;
@@ -1279,6 +1371,7 @@ int rx_worker(void *arg)
                                 local_bits += __builtin_popcount(recv_prbs[i] ^ expected_prbs[i]);
                             }
                         }
+#endif
 
                         // ==========================================
                         // SEQUENCE TRACKING FOR EXTERNAL PACKETS
@@ -1394,10 +1487,23 @@ int rx_worker(void *arg)
                 // PRBS-31 VERIFICATION
                 // ==========================================
                 uint8_t *recv = pkt + payload_off + SEQ_BYTES;
+
+#if IMIX_ENABLED
+                // IMIX: PRBS offset hesabı HEP MAX_PRBS_BYTES ile yapılır
+                // PRBS boyutu paket boyutundan hesaplanır
+                uint16_t prbs_len = m->pkt_len - l2_len_vlan - 20 - 8 - SEQ_BYTES;
+                if (prbs_len > MAX_PRBS_BYTES) prbs_len = MAX_PRBS_BYTES;
+
+                uint64_t off = (seq * (uint64_t)MAX_PRBS_BYTES) % (uint64_t)PRBS_CACHE_SIZE;
+                uint8_t *exp = prbs_cache_ext + off;
+
+                int diff = memcmp(recv, exp, prbs_len);
+#else
                 uint64_t off = (seq * (uint64_t)NUM_PRBS_BYTES) % (uint64_t)PRBS_CACHE_SIZE;
                 uint8_t *exp = prbs_cache_ext + off;
 
                 int diff = memcmp(recv, exp, NUM_PRBS_BYTES);
+#endif
 
                 if (likely(diff == 0))
                 {
@@ -1423,21 +1529,29 @@ int rx_worker(void *arg)
                     uint64_t berr = 0;
                     const uint64_t *r64 = (const uint64_t *)recv;
                     const uint64_t *e64 = (const uint64_t *)exp;
+#if IMIX_ENABLED
+                    const uint16_t nq = prbs_len / 8;
+#else
                     const uint16_t nq = NUM_PRBS_BYTES / 8;
+#endif
 
                     for (uint16_t k = 0; k < nq; k++)
                     {
                         berr += __builtin_popcountll(r64[k] ^ e64[k]);
                     }
 
+#if IMIX_ENABLED
+                    uint16_t rem = prbs_len & 7;
+#else
                     uint16_t rem = NUM_PRBS_BYTES & 7;
+#endif
                     if (rem)
                     {
                         const uint8_t *r8 = (const uint8_t *)(r64 + nq);
                         const uint8_t *e8 = (const uint8_t *)(e64 + nq);
-                        for (uint16_t m = 0; m < rem; m++)
+                        for (uint16_t k = 0; k < rem; k++)
                         {
-                            berr += __builtin_popcount(r8[m] ^ e8[m]);
+                            berr += __builtin_popcount(r8[k] ^ e8[k]);
                         }
                     }
 

@@ -165,53 +165,55 @@ uint8_t* get_prbs_cache_ext_for_port(uint16_t port_id)
     return port_prbs_cache[port_id].cache_ext;
 }
 
-void fill_payload_with_prbs31(struct rte_mbuf *mbuf, uint16_t port_id,
-                              uint64_t sequence_number, uint16_t l2_len)
+void fill_payload_with_prbs31_dynamic(struct rte_mbuf *mbuf, uint16_t port_id,
+                                       uint64_t sequence_number, uint16_t l2_len,
+                                       uint16_t prbs_len)
 {
     // Safety checks
     if (unlikely(!mbuf)) {
-        printf("Error: NULL mbuf in fill_payload_with_prbs31\n");
+        printf("Error: NULL mbuf in fill_payload_with_prbs31_dynamic\n");
         return;
     }
-    
+
     if (unlikely(port_id >= MAX_PRBS_CACHE_PORTS)) {
-        printf("Error: Invalid port_id %u in fill_payload_with_prbs31\n", port_id);
+        printf("Error: Invalid port_id %u in fill_payload_with_prbs31_dynamic\n", port_id);
         return;
     }
-    
+
     if (unlikely(!port_prbs_cache[port_id].initialized)) {
         printf("Error: PRBS cache not initialized for port %u\n", port_id);
         return;
     }
-    
+
     if (unlikely(!port_prbs_cache[port_id].cache_ext)) {
         printf("Error: PRBS cache_ext is NULL for port %u\n", port_id);
         return;
     }
-    
+
     const uint32_t payload_offset = l2_len + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
-    
-    // Check if offset is valid
-    if (unlikely(payload_offset + SEQ_BYTES + NUM_PRBS_BYTES > rte_pktmbuf_data_len(mbuf))) {
-        printf("Error: Invalid payload offset %u for mbuf data_len %u\n", 
-               payload_offset, rte_pktmbuf_data_len(mbuf));
+
+    // Check if offset is valid (dinamik prbs_len ile kontrol)
+    if (unlikely(payload_offset + SEQ_BYTES + prbs_len > rte_pktmbuf_data_len(mbuf))) {
+        printf("Error: Invalid payload offset %u + seq %u + prbs %u > data_len %u\n",
+               payload_offset, SEQ_BYTES, prbs_len, rte_pktmbuf_data_len(mbuf));
         return;
     }
-    
+
     // Write sequence number (first 8 bytes of payload)
     uint64_t *seq_ptr = rte_pktmbuf_mtod_offset(mbuf, uint64_t *, payload_offset);
     *seq_ptr = sequence_number;
-    
+
     // PRBS data starts after sequence number
     uint8_t *prbs_ptr = rte_pktmbuf_mtod_offset(mbuf, uint8_t *, payload_offset + SEQ_BYTES);
-    
-    // Calculate offset in PRBS cache based on sequence number
-    const uint64_t start_offset = (sequence_number * (uint64_t)NUM_PRBS_BYTES) % (uint64_t)PRBS_CACHE_SIZE;
-    
-    // Use extended cache - NO WRAPAROUND CHECK NEEDED!
-    rte_memcpy(prbs_ptr, 
-               &port_prbs_cache[port_id].cache_ext[start_offset], 
-               NUM_PRBS_BYTES);
+
+    // IMIX: PRBS offset hesabı HEP MAX_PRBS_BYTES ile yapılır
+    // Bu sayede RX tarafı sequence'dan offset'i hesaplayabilir
+    const uint64_t start_offset = (sequence_number * (uint64_t)MAX_PRBS_BYTES) % (uint64_t)PRBS_CACHE_SIZE;
+
+    // Use extended cache - sadece prbs_len kadar kopyala
+    rte_memcpy(prbs_ptr,
+               &port_prbs_cache[port_id].cache_ext[start_offset],
+               prbs_len);
 }
 
 void cleanup_prbs_cache(void)
@@ -381,18 +383,95 @@ int build_packet_mbuf(struct rte_mbuf *mbuf, const struct packet_config *config)
     if (!mbuf || !config) {
         return -1;
     }
-    
+
     uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
     struct packet_template *pkt = (struct packet_template *)pkt_data;
-    
+
     int ret = build_packet(pkt, config);
     if (ret < 0) {
         return ret;
     }
-    
+
     mbuf->data_len = PACKET_SIZE;
     mbuf->pkt_len = PACKET_SIZE;
-    
+
+    return 0;
+}
+
+int build_packet_dynamic(struct rte_mbuf *mbuf, const struct packet_config *config,
+                          uint16_t packet_size)
+{
+    if (!mbuf || !config) {
+        return -1;
+    }
+
+    uint8_t *pkt_data = rte_pktmbuf_mtod(mbuf, uint8_t *);
+
+    // Payload boyutunu hesapla
+#if VLAN_ENABLED
+    const uint16_t l2_len = ETH_HDR_SIZE + VLAN_HDR_SIZE;
+#else
+    const uint16_t l2_len = ETH_HDR_SIZE;
+#endif
+    const uint16_t payload_size = packet_size - l2_len - IP_HDR_SIZE - UDP_HDR_SIZE;
+
+    // ==========================================
+    // ETHERNET HEADER
+    // ==========================================
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt_data;
+    memcpy(&eth->dst_addr, &config->dst_mac, sizeof(struct rte_ether_addr));
+    memcpy(&eth->src_addr, &config->src_mac, sizeof(struct rte_ether_addr));
+
+#if VLAN_ENABLED
+    eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_VLAN);
+
+    // VLAN header
+    struct vlan_hdr *vlan = (struct vlan_hdr *)(pkt_data + ETH_HDR_SIZE);
+    uint16_t tci = ((config->vlan_priority & 0x07) << 13) | (config->vlan_id & 0x0FFF);
+    vlan->tci = rte_cpu_to_be_16(tci);
+    vlan->eth_proto = rte_cpu_to_be_16(ETHER_TYPE_IPv4);
+
+    // IP header offset
+    struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(pkt_data + ETH_HDR_SIZE + VLAN_HDR_SIZE);
+#else
+    eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv4);
+    struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(pkt_data + ETH_HDR_SIZE);
+#endif
+
+    // ==========================================
+    // IP HEADER (dinamik total_length)
+    // ==========================================
+    ip->version_ihl = 0x45;
+    ip->type_of_service = config->tos;
+    ip->total_length = rte_cpu_to_be_16(IP_HDR_SIZE + UDP_HDR_SIZE + payload_size);
+    ip->packet_id = 0;
+    ip->fragment_offset = 0;
+    ip->time_to_live = config->ttl;
+    ip->next_proto_id = IPPROTO_UDP;
+    ip->hdr_checksum = 0;
+    ip->src_addr = rte_cpu_to_be_32(config->src_ip);
+    ip->dst_addr = rte_cpu_to_be_32(config->dst_ip);
+
+    // IP checksum hesapla
+    struct rte_ipv4_hdr ip_copy;
+    memcpy(&ip_copy, ip, sizeof(struct rte_ipv4_hdr));
+    ip->hdr_checksum = calculate_ip_checksum(&ip_copy);
+
+    // ==========================================
+    // UDP HEADER (dinamik dgram_len)
+    // ==========================================
+    struct rte_udp_hdr *udp = (struct rte_udp_hdr *)((uint8_t *)ip + IP_HDR_SIZE);
+    udp->src_port = rte_cpu_to_be_16(config->src_port);
+    udp->dst_port = rte_cpu_to_be_16(config->dst_port);
+    udp->dgram_len = rte_cpu_to_be_16(UDP_HDR_SIZE + payload_size);
+    udp->dgram_cksum = 0;  // UDP checksum disabled
+
+    // ==========================================
+    // SET MBUF LENGTHS (dinamik)
+    // ==========================================
+    mbuf->data_len = packet_size;
+    mbuf->pkt_len = packet_size;
+
     return 0;
 }
 

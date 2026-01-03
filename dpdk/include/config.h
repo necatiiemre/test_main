@@ -6,6 +6,51 @@
 #define stringify(x) #x
 
 // ==========================================
+// IMIX (Internet Mix) CONFIGURATION
+// ==========================================
+// Özel IMIX profili: Farklı paket boyutlarının dağılımı
+// Toplam oran: %10 + %10 + %10 + %10 + %30 + %30 = %100
+//
+// 10 paketlik döngüde:
+//   1x 100 byte  (%10)
+//   1x 200 byte  (%10)
+//   1x 400 byte  (%10)
+//   1x 800 byte  (%10)
+//   3x 1200 byte (%30)
+//   3x 1518 byte (%30)  - MTU sınırı
+//
+// Ortalama paket boyutu: ~964 byte
+
+#define IMIX_ENABLED 1
+
+// IMIX boyut seviyeleri (Ethernet frame boyutu, VLAN dahil)
+#define IMIX_SIZE_1    100    // En küçük
+#define IMIX_SIZE_2    200
+#define IMIX_SIZE_3    400
+#define IMIX_SIZE_4    800
+#define IMIX_SIZE_5    1200
+#define IMIX_SIZE_6    1518   // MTU sınırı (VLAN ile 1522, ama 1518 güvenli)
+
+// IMIX pattern boyutu (10 paketlik döngü)
+#define IMIX_PATTERN_SIZE 10
+
+// IMIX ortalama paket boyutu (rate limiting için)
+// (100 + 200 + 400 + 800 + 1200*3 + 1518*3) / 10 = 964.4
+#define IMIX_AVG_PACKET_SIZE 964
+
+// IMIX minimum ve maksimum boyutlar
+#define IMIX_MIN_PACKET_SIZE IMIX_SIZE_1
+#define IMIX_MAX_PACKET_SIZE IMIX_SIZE_6
+
+// IMIX pattern dizisi (statik tanım - her worker kendi offset'i ile kullanır)
+// Sıra: 100, 200, 400, 800, 1200, 1200, 1200, 1518, 1518, 1518
+#define IMIX_PATTERN_INIT { \
+    IMIX_SIZE_1, IMIX_SIZE_2, IMIX_SIZE_3, IMIX_SIZE_4, \
+    IMIX_SIZE_5, IMIX_SIZE_5, IMIX_SIZE_5, \
+    IMIX_SIZE_6, IMIX_SIZE_6, IMIX_SIZE_6 \
+}
+
+// ==========================================
 // RAW SOCKET PORT CONFIGURATION (Non-DPDK)
 // ==========================================
 // Bu portlar DPDK desteklemeyen NIC'ler için raw socket + zero copy kullanır.

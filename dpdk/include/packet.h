@@ -7,6 +7,7 @@
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_mbuf.h>
+#include "config.h"  // IMIX configuration
 
 /*
  *  Paket yapısı:
@@ -40,7 +41,7 @@
 // PAYLOAD & PACKET SIZES
 // ==========================================
 #define PAYLOAD_SIZE_NO_VLAN 1471  // 8 seq + 1463 prbs
-#define PAYLOAD_SIZE_VLAN    1467  // 8 seq + 1460 prbs
+#define PAYLOAD_SIZE_VLAN    1467  // 8 seq + 1460 prbs (1518 - 14 - 4 - 20 - 8 - 5 = 1467)
 #define VLAN_TAG_SIZE        4
 
 #define ETH_HDR_SIZE  14
@@ -55,10 +56,39 @@
 # define PACKET_SIZE   PACKET_SIZE_VLAN
 # define PAYLOAD_SIZE  PAYLOAD_SIZE_VLAN
 # define NUM_PRBS_BYTES (PAYLOAD_SIZE_VLAN - SEQ_BYTES)
+# define L2_HEADER_SIZE (ETH_HDR_SIZE + VLAN_HDR_SIZE)
 #else
 # define PACKET_SIZE   PACKET_SIZE_NO_VLAN
 # define PAYLOAD_SIZE  PAYLOAD_SIZE_NO_VLAN
 # define NUM_PRBS_BYTES (PAYLOAD_SIZE_NO_VLAN - SEQ_BYTES)
+# define L2_HEADER_SIZE ETH_HDR_SIZE
+#endif
+
+// ==========================================
+// IMIX SUPPORT - DYNAMIC PACKET SIZES
+// ==========================================
+// IMIX modunda paket boyutları değişken olur.
+// MAX_PRBS_BYTES: PRBS offset hesabı için sabit (en büyük PRBS boyutu)
+// Bu değer tüm boyutlar için aynı formülle kullanılır:
+//   offset = (sequence × MAX_PRBS_BYTES) % PRBS_CACHE_SIZE
+// Böylece RX tarafı sequence'dan offset'i hesaplayabilir.
+
+#define MAX_PRBS_BYTES NUM_PRBS_BYTES  // 1459 (VLAN) veya 1463 (non-VLAN)
+
+// IMIX için minimum payload boyutu
+// 100 byte paket: 100 - L2(18) - IP(20) - UDP(8) = 54 byte payload
+// Payload = SEQ(8) + PRBS(46) minimum
+#define MIN_IMIX_PAYLOAD_VLAN    (100 - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
+#define MIN_IMIX_PAYLOAD_NO_VLAN (100 - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
+#define MIN_IMIX_PRBS_BYTES      (MIN_IMIX_PAYLOAD_VLAN - SEQ_BYTES)  // 46 bytes
+
+// Paket boyutundan PRBS boyutunu hesapla
+#if VLAN_ENABLED
+# define CALC_PRBS_LEN(pkt_size) ((pkt_size) - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE - SEQ_BYTES)
+# define CALC_PAYLOAD_LEN(pkt_size) ((pkt_size) - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
+#else
+# define CALC_PRBS_LEN(pkt_size) ((pkt_size) - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE - SEQ_BYTES)
+# define CALC_PAYLOAD_LEN(pkt_size) ((pkt_size) - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE)
 #endif
 
 #define ETHER_TYPE_IPv4 0x0800
@@ -155,8 +185,44 @@ int  set_mac_from_string(struct rte_ether_addr *mac, const char *mac_str);
 int  set_ip_from_string(uint32_t *ip, const char *ip_str);
 void print_packet_info(const struct packet_config *config);
 
-// Fill PRBS payload for TX
-void fill_payload_with_prbs31(struct rte_mbuf *mbuf, uint16_t port_id,
-                              uint64_t sequence_number, uint16_t l2_len);
+// Fill PRBS payload for TX (dinamik boyut destekli)
+// prbs_len: Yazılacak PRBS byte sayısı (IMIX için değişken)
+void fill_payload_with_prbs31_dynamic(struct rte_mbuf *mbuf, uint16_t port_id,
+                                       uint64_t sequence_number, uint16_t l2_len,
+                                       uint16_t prbs_len);
+
+// Legacy wrapper (sabit boyut için geriye uyumluluk)
+static inline void fill_payload_with_prbs31(struct rte_mbuf *mbuf, uint16_t port_id,
+                                             uint64_t sequence_number, uint16_t l2_len)
+{
+    fill_payload_with_prbs31_dynamic(mbuf, port_id, sequence_number, l2_len, NUM_PRBS_BYTES);
+}
+
+// ==========================================
+// IMIX HELPER FUNCTIONS
+// ==========================================
+
+// IMIX pattern'den paket boyutu al (worker'ın offset + counter'ına göre)
+static inline uint16_t get_imix_packet_size(uint64_t pkt_counter, uint8_t worker_offset)
+{
+    static const uint16_t imix_pattern[IMIX_PATTERN_SIZE] = IMIX_PATTERN_INIT;
+    return imix_pattern[(pkt_counter + worker_offset) % IMIX_PATTERN_SIZE];
+}
+
+// Paket boyutundan payload boyutunu hesapla
+static inline uint16_t calc_payload_size(uint16_t pkt_size)
+{
+    return CALC_PAYLOAD_LEN(pkt_size);
+}
+
+// Paket boyutundan PRBS boyutunu hesapla
+static inline uint16_t calc_prbs_size(uint16_t pkt_size)
+{
+    return CALC_PRBS_LEN(pkt_size);
+}
+
+// Dinamik boyutlu paket oluştur
+int build_packet_dynamic(struct rte_mbuf *mbuf, const struct packet_config *config,
+                          uint16_t packet_size);
 
 #endif /* PACKET_H */

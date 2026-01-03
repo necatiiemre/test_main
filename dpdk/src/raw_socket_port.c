@@ -265,51 +265,7 @@ void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rat
 #endif
 }
 
-// Check if it's time to send next packet (smooth pacing)
-// For IMIX mode: just checks tokens, doesn't consume (use raw_consume_pkt_tokens after)
-bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
-{
-    if (!limiter->smooth_pacing_enabled) {
-#if IMIX_ENABLED
-        // IMIX: Just check if we have enough tokens for minimum packet
-        // Actual consumption happens after we know the packet size
-        update_raw_tokens(limiter);
-        return (limiter->tokens >= RAW_IMIX_SIZE_01);  // Minimum IMIX size
-#else
-        return raw_consume_tokens(limiter, RAW_PKT_TOTAL_SIZE);
-#endif
-    }
-
-    uint64_t now = get_time_ns();
-
-    // Not time yet
-    if (now < limiter->next_send_time_ns) {
-        return false;
-    }
-
-    // If we're too far behind (>2ms), reset to now (prevents large burst)
-    if (limiter->next_send_time_ns + 2000000ULL < now) {
-        limiter->next_send_time_ns = now;
-    }
-
-    // Schedule next packet
-    limiter->next_send_time_ns += limiter->delay_ns;
-
-    return true;
-}
-
-#if IMIX_ENABLED
-// Consume tokens for actual packet size (IMIX mode)
-static inline void raw_consume_pkt_tokens(struct raw_rate_limiter *limiter, uint16_t pkt_size)
-{
-    if (limiter->tokens >= pkt_size) {
-        limiter->tokens -= pkt_size;
-    } else {
-        limiter->tokens = 0;
-    }
-}
-#endif
-
+// Update token bucket (add tokens based on elapsed time)
 static void update_raw_tokens(struct raw_rate_limiter *limiter)
 {
     uint64_t now = get_time_ns();
@@ -341,6 +297,51 @@ bool raw_consume_tokens(struct raw_rate_limiter *limiter, uint64_t bytes)
     }
 
     return false;
+}
+
+#if IMIX_ENABLED
+// Consume tokens for actual packet size (IMIX mode)
+static inline void raw_consume_pkt_tokens(struct raw_rate_limiter *limiter, uint16_t pkt_size)
+{
+    if (limiter->tokens >= pkt_size) {
+        limiter->tokens -= pkt_size;
+    } else {
+        limiter->tokens = 0;
+    }
+}
+#endif
+
+// Check if it's time to send next packet (smooth pacing)
+// For IMIX mode: just checks tokens, doesn't consume (use raw_consume_pkt_tokens after)
+bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
+{
+    if (!limiter->smooth_pacing_enabled) {
+#if IMIX_ENABLED
+        // IMIX: Just check if we have enough tokens for minimum packet
+        // Actual consumption happens after we know the packet size
+        update_raw_tokens(limiter);
+        return (limiter->tokens >= RAW_IMIX_SIZE_01);  // Minimum IMIX size
+#else
+        return raw_consume_tokens(limiter, RAW_PKT_TOTAL_SIZE);
+#endif
+    }
+
+    uint64_t now = get_time_ns();
+
+    // Not time yet
+    if (now < limiter->next_send_time_ns) {
+        return false;
+    }
+
+    // If we're too far behind (>2ms), reset to now (prevents large burst)
+    if (limiter->next_send_time_ns + 2000000ULL < now) {
+        limiter->next_send_time_ns = now;
+    }
+
+    // Schedule next packet
+    limiter->next_send_time_ns += limiter->delay_ns;
+
+    return true;
 }
 
 // ==========================================

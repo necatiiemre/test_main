@@ -285,7 +285,7 @@ int dpdk_ext_tx_worker(void *arg)
     printf("ExtTX Worker started: Port %u Q%u, %u targets, Rate %u Mbps\n",
            params->port_id, params->queue_id, target_count, params->rate_mbps);
 #if IMIX_ENABLED
-    printf("  *** IMIX MODE + SMOOTH PACING (16 sizes, 27 packets) ***\n");
+    printf("  *** IMIX MODE + SMOOTH PACING (11 sizes, 16 packets) ***\n");
     printf("  -> IMIX pattern: 75x2..1518x1 (avg=%lu bytes)\n", avg_pkt_size);
     printf("  -> Worker offset: %u (hybrid shuffle)\n", imix_offset);
 #else

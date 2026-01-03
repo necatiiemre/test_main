@@ -8,14 +8,14 @@
 // ==========================================
 // IMIX (Internet Mix) CONFIGURATION
 // ==========================================
-// Dengeli IMIX profili: 16 farklı paket boyutu, 27 paketlik döngü
+// Dengeli IMIX profili: 11 farklı paket boyutu, 16 paketlik döngü
 //
 // Katsayılar:
-//   x2: 75, 115, 235, 325, 435, 545, 695, 785, 895, 985, 1095 (11 boyut × 2 = 22 paket)
-//   x1: 1195, 1275, 1385, 1495, 1518 (5 boyut × 1 = 5 paket)
+//   x2: 75, 115, 235, 795, 885 (5 boyut × 2 = 10 paket)
+//   x1: 1085, 1195, 1285, 1395, 1485, 1518 (6 boyut × 1 = 6 paket)
 //
-// Toplam: 22 + 5 = 27 paket
-// Ortalama paket boyutu: ~713 byte
+// Toplam: 10 + 6 = 16 paket
+// Ortalama paket boyutu: ~761 byte
 
 #define IMIX_ENABLED 1
 
@@ -24,51 +24,40 @@
 #define IMIX_SIZE_01    75
 #define IMIX_SIZE_02    115
 #define IMIX_SIZE_03    235
-#define IMIX_SIZE_04    325
-#define IMIX_SIZE_05    435
-#define IMIX_SIZE_06    545
-#define IMIX_SIZE_07    695
-#define IMIX_SIZE_08    785
-#define IMIX_SIZE_09    895
-#define IMIX_SIZE_10    985
-#define IMIX_SIZE_11    1095
+#define IMIX_SIZE_04    795
+#define IMIX_SIZE_05    885
 
 // x1 katsayılı boyutlar (her biri 1 kez)
-#define IMIX_SIZE_12    1195
-#define IMIX_SIZE_13    1275
-#define IMIX_SIZE_14    1385
-#define IMIX_SIZE_15    1495
-#define IMIX_SIZE_16    1518   // MTU sınırı
+#define IMIX_SIZE_06    1085
+#define IMIX_SIZE_07    1195
+#define IMIX_SIZE_08    1285
+#define IMIX_SIZE_09    1395
+#define IMIX_SIZE_10    1485
+#define IMIX_SIZE_11    1518   // MTU sınırı
 
-// IMIX pattern boyutu (27 paketlik döngü)
-#define IMIX_PATTERN_SIZE 27
+// IMIX pattern boyutu (16 paketlik döngü)
+#define IMIX_PATTERN_SIZE 16
 
 // IMIX ortalama paket boyutu (rate limiting için)
-// x2: (75+115+235+325+435+545+695+785+895+985+1095)*2 = 6185*2 = 12370
-// x1: 1195+1275+1385+1495+1518 = 6868
-// Toplam: 19238 / 27 = 712.5 ≈ 713
-#define IMIX_AVG_PACKET_SIZE 713
+// x2: (75+115+235+795+885)*2 = 2105*2 = 4210
+// x1: 1085+1195+1285+1395+1485+1518 = 7963
+// Toplam: 12173 / 16 = 761
+#define IMIX_AVG_PACKET_SIZE 761
 
 // IMIX minimum ve maksimum boyutlar
 #define IMIX_MIN_PACKET_SIZE IMIX_SIZE_01
-#define IMIX_MAX_PACKET_SIZE IMIX_SIZE_16
+#define IMIX_MAX_PACKET_SIZE IMIX_SIZE_11
 
-// IMIX pattern dizisi (27 paketlik - her worker kendi offset'i ile kullanır)
+// IMIX pattern dizisi (16 paketlik - her worker kendi offset'i ile kullanır)
 #define IMIX_PATTERN_INIT { \
-    /* x2 boyutlar (22 paket) */ \
+    /* x2 boyutlar (10 paket) */ \
     IMIX_SIZE_01, IMIX_SIZE_01, \
     IMIX_SIZE_02, IMIX_SIZE_02, \
     IMIX_SIZE_03, IMIX_SIZE_03, \
     IMIX_SIZE_04, IMIX_SIZE_04, \
     IMIX_SIZE_05, IMIX_SIZE_05, \
-    IMIX_SIZE_06, IMIX_SIZE_06, \
-    IMIX_SIZE_07, IMIX_SIZE_07, \
-    IMIX_SIZE_08, IMIX_SIZE_08, \
-    IMIX_SIZE_09, IMIX_SIZE_09, \
-    IMIX_SIZE_10, IMIX_SIZE_10, \
-    IMIX_SIZE_11, IMIX_SIZE_11, \
-    /* x1 boyutlar (5 paket) */ \
-    IMIX_SIZE_12, IMIX_SIZE_13, IMIX_SIZE_14, IMIX_SIZE_15, IMIX_SIZE_16 \
+    /* x1 boyutlar (6 paket) */ \
+    IMIX_SIZE_06, IMIX_SIZE_07, IMIX_SIZE_08, IMIX_SIZE_09, IMIX_SIZE_10, IMIX_SIZE_11 \
 }
 
 // ==========================================

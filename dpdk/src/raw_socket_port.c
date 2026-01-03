@@ -219,41 +219,30 @@ void init_raw_rate_limiter(struct raw_rate_limiter *limiter, uint32_t rate_mbps)
 void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rate_mbps,
                                    uint16_t target_id, uint16_t total_targets)
 {
-    // Token bucket: byte-based rate limiting (works better with IMIX)
+    // Also init token bucket as fallback
     limiter->tokens_per_sec = (uint64_t)rate_mbps * 1000000ULL / 8ULL;
-
-#if IMIX_ENABLED
-    // IMIX: Use token bucket instead of smooth pacing
-    // Apply 18% overhead compensation (205/240 = 85% efficiency observed)
-    uint64_t compensated_rate = (limiter->tokens_per_sec * 118) / 100;
-    limiter->tokens_per_sec = compensated_rate;
-
-    // 50ms burst window for better handling of variable packet sizes
-    limiter->max_tokens = limiter->tokens_per_sec / 20;  // 50ms burst window
-    limiter->tokens = limiter->max_tokens;  // Start full for immediate sending
-    limiter->last_update_ns = get_time_ns();
-    limiter->smooth_pacing_enabled = false;  // Use token bucket for IMIX
-
-    printf("[Raw Rate Limiter] Target %u: rate=%u Mbps (+18%% overhead = %lu bytes/s), "
-           "TOKEN BUCKET, bucket=%lu bytes (50ms)\n",
-           target_id, rate_mbps, compensated_rate, limiter->max_tokens);
-#else
-    // Fixed packet size: use smooth pacing for consistent timing
-    limiter->max_tokens = limiter->tokens_per_sec / 2000;  // 0.5ms burst
+    limiter->max_tokens = limiter->tokens_per_sec / 2000;  // 0.5ms burst (like DPDK)
     limiter->tokens = 0;  // Soft start
     limiter->last_update_ns = get_time_ns();
 
     // Calculate smooth pacing parameters
+    // bytes_per_sec = rate_mbps * 1000000 / 8
     uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL;
+#if IMIX_ENABLED
+    uint64_t packets_per_sec = bytes_per_sec / RAW_IMIX_AVG_PACKET_SIZE;
+#else
     uint64_t packets_per_sec = bytes_per_sec / RAW_PKT_TOTAL_SIZE;
+#endif
 
     if (packets_per_sec > 0) {
+        // delay_ns = 1 second in ns / packets_per_sec
         limiter->delay_ns = 1000000000ULL / packets_per_sec;
     } else {
-        limiter->delay_ns = 1000000000ULL;
+        limiter->delay_ns = 1000000000ULL;  // 1 second if rate is 0
     }
 
-    // Stagger start time
+    // Stagger start time: Each target starts at different offset
+    // This spreads traffic smoothly across all targets
     uint64_t stagger_interval_ns = 50000000ULL;  // 50ms per target
     uint64_t stagger_offset = (uint64_t)target_id * stagger_interval_ns;
     limiter->next_send_time_ns = get_time_ns() + stagger_offset;
@@ -265,10 +254,33 @@ void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rat
            target_id, rate_mbps, limiter->delay_ns,
            (double)limiter->delay_ns / 1000.0,
            packets_per_sec, stagger_offset / 1000000);
-#endif
 }
 
-// Update token bucket (add tokens based on elapsed time)
+// Check if it's time to send next packet (smooth pacing)
+bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
+{
+    if (!limiter->smooth_pacing_enabled) {
+        return raw_consume_tokens(limiter, RAW_PKT_TOTAL_SIZE);
+    }
+
+    uint64_t now = get_time_ns();
+
+    // Not time yet
+    if (now < limiter->next_send_time_ns) {
+        return false;
+    }
+
+    // If we're too far behind (>2ms), reset to now (prevents large burst)
+    if (limiter->next_send_time_ns + 2000000ULL < now) {
+        limiter->next_send_time_ns = now;
+    }
+
+    // Schedule next packet
+    limiter->next_send_time_ns += limiter->delay_ns;
+
+    return true;
+}
+
 static void update_raw_tokens(struct raw_rate_limiter *limiter)
 {
     uint64_t now = get_time_ns();
@@ -300,51 +312,6 @@ bool raw_consume_tokens(struct raw_rate_limiter *limiter, uint64_t bytes)
     }
 
     return false;
-}
-
-#if IMIX_ENABLED
-// Consume tokens for actual packet size (IMIX mode)
-static inline void raw_consume_pkt_tokens(struct raw_rate_limiter *limiter, uint16_t pkt_size)
-{
-    if (limiter->tokens >= pkt_size) {
-        limiter->tokens -= pkt_size;
-    } else {
-        limiter->tokens = 0;
-    }
-}
-#endif
-
-// Check if it's time to send next packet (smooth pacing)
-// For IMIX mode: just checks tokens, doesn't consume (use raw_consume_pkt_tokens after)
-bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
-{
-    if (!limiter->smooth_pacing_enabled) {
-#if IMIX_ENABLED
-        // IMIX: Check if we have enough tokens for average packet size
-        // This ensures accurate byte-based rate limiting
-        update_raw_tokens(limiter);
-        return (limiter->tokens >= RAW_IMIX_AVG_PACKET_SIZE);
-#else
-        return raw_consume_tokens(limiter, RAW_PKT_TOTAL_SIZE);
-#endif
-    }
-
-    uint64_t now = get_time_ns();
-
-    // Not time yet
-    if (now < limiter->next_send_time_ns) {
-        return false;
-    }
-
-    // If we're too far behind (>2ms), reset to now (prevents large burst)
-    if (limiter->next_send_time_ns + 2000000ULL < now) {
-        limiter->next_send_time_ns = now;
-    }
-
-    // Schedule next packet
-    limiter->next_send_time_ns += limiter->delay_ns;
-
-    return true;
 }
 
 // ==========================================
@@ -1022,7 +989,7 @@ void *raw_tx_worker(void *arg)
     // IMIX: Worker offset (her target için farklı pattern başlangıcı)
     uint8_t imix_offset = (uint8_t)(port->port_id % IMIX_PATTERN_SIZE);
     uint64_t imix_counter = 0;
-    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING, 16 sizes, 27 packets)\n",
+    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING, 11 sizes, 16 packets)\n",
            port->port_id, port->tx_target_count);
     printf("[Port %u TX] IMIX pattern: 71x2..1514x1 (avg=%d bytes)\n",
            port->port_id, RAW_IMIX_AVG_PACKET_SIZE);
@@ -1071,9 +1038,6 @@ void *raw_tx_worker(void *arg)
                 uint16_t pkt_size = get_raw_imix_packet_size(imix_counter, imix_offset);
                 uint16_t prbs_len = calc_raw_prbs_size(pkt_size);
                 imix_counter++;
-
-                // IMIX: Consume tokens for actual packet size (byte-based rate limiting)
-                raw_consume_pkt_tokens(&target->limiter, pkt_size);
 
                 // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
                 uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;

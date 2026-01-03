@@ -219,16 +219,16 @@ void init_raw_rate_limiter(struct raw_rate_limiter *limiter, uint32_t rate_mbps)
 void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rate_mbps,
                                    uint16_t target_id, uint16_t total_targets)
 {
-    // Also init token bucket as fallback
-    limiter->tokens_per_sec = (uint64_t)rate_mbps * 1000000ULL / 8ULL;
+    // Token bucket as fallback - 2x rate for headroom
+    limiter->tokens_per_sec = (uint64_t)rate_mbps * 2000000ULL / 8ULL;
     limiter->max_tokens = limiter->tokens_per_sec / 2000;  // 0.5ms burst (like DPDK)
     limiter->tokens = 0;  // Soft start
     limiter->last_update_ns = get_time_ns();
 
     // Calculate smooth pacing parameters
     // bytes_per_sec = rate_mbps * 1000000 / 8
-    // Add 16% overhead compensation for syscall/timing overhead at high pps
-    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL * 116ULL / 100ULL;
+    // Add 25% overhead compensation for syscall/timing overhead at high pps
+    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL * 125ULL / 100ULL;
 #if IMIX_ENABLED
     uint64_t packets_per_sec = bytes_per_sec / RAW_IMIX_AVG_PACKET_SIZE;
 #else

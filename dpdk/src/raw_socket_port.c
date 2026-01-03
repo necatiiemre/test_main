@@ -219,42 +219,56 @@ void init_raw_rate_limiter(struct raw_rate_limiter *limiter, uint32_t rate_mbps)
 void init_raw_rate_limiter_smooth(struct raw_rate_limiter *limiter, uint32_t rate_mbps,
                                    uint16_t target_id, uint16_t total_targets)
 {
-    // Token bucket as fallback - 2x rate for headroom
-    limiter->tokens_per_sec = (uint64_t)rate_mbps * 2000000ULL / 8ULL;
-    limiter->max_tokens = limiter->tokens_per_sec / 2000;  // 0.5ms burst (like DPDK)
-    limiter->tokens = 0;  // Soft start
-    limiter->last_update_ns = get_time_ns();
+    // Reference: 1513 byte packets work fine without compensation
+    // Smaller packets need compensation due to per-packet syscall overhead
+    const uint64_t REFERENCE_PKT_SIZE = 1513;
 
-    // Calculate smooth pacing parameters
-    // bytes_per_sec = rate_mbps * 1000000 / 8
-    // Add 25% overhead compensation for syscall/timing overhead at high pps
-    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL * 125ULL / 100ULL;
 #if IMIX_ENABLED
-    uint64_t packets_per_sec = bytes_per_sec / RAW_IMIX_AVG_PACKET_SIZE;
+    uint64_t avg_pkt_size = RAW_IMIX_AVG_PACKET_SIZE;
 #else
-    uint64_t packets_per_sec = bytes_per_sec / RAW_PKT_TOTAL_SIZE;
+    uint64_t avg_pkt_size = RAW_PKT_TOTAL_SIZE;
 #endif
 
-    if (packets_per_sec > 0) {
-        // delay_ns = 1 second in ns / packets_per_sec
-        limiter->delay_ns = 1000000000ULL / packets_per_sec;
-    } else {
-        limiter->delay_ns = 1000000000ULL;  // 1 second if rate is 0
+    // Calculate base rate
+    uint64_t bytes_per_sec = (uint64_t)rate_mbps * 125000ULL;  // Mbps to bytes/sec
+    uint64_t packets_per_sec = bytes_per_sec / avg_pkt_size;
+
+    // Dynamic overhead compensation based on packet size
+    // Smaller packets = higher pps = more syscall overhead per byte
+    // At 757 bytes (vs 1513 ref), we have 2x pps, need ~30% compensation
+    uint64_t compensation_percent = 100;
+    if (avg_pkt_size < REFERENCE_PKT_SIZE) {
+        // Linear scale: smaller packets need more compensation
+        // 757 bytes -> 30%, 500 bytes -> 45%, etc.
+        compensation_percent = 100 + (REFERENCE_PKT_SIZE - avg_pkt_size) * 40 / avg_pkt_size;
     }
 
-    // Stagger start time: Each target starts at different offset
-    // This spreads traffic smoothly across all targets
-    uint64_t stagger_interval_ns = 50000000ULL;  // 50ms per target
-    uint64_t stagger_offset = (uint64_t)target_id * stagger_interval_ns;
+    // Apply compensation to packets_per_sec
+    packets_per_sec = packets_per_sec * compensation_percent / 100;
+
+    // Calculate inter-packet delay
+    if (packets_per_sec > 0) {
+        limiter->delay_ns = 1000000000ULL / packets_per_sec;
+    } else {
+        limiter->delay_ns = 1000000000ULL;
+    }
+
+    // Stagger start time to spread traffic across targets
+    uint64_t stagger_offset = (uint64_t)target_id * 10000000ULL;  // 10ms per target
     limiter->next_send_time_ns = get_time_ns() + stagger_offset;
 
     limiter->smooth_pacing_enabled = true;
 
-    printf("[Raw Rate Limiter] Target %u: rate=%u Mbps, delay=%lu ns (%.2f us), "
-           "pps=%lu, stagger=%lu ms\n",
-           target_id, rate_mbps, limiter->delay_ns,
-           (double)limiter->delay_ns / 1000.0,
-           packets_per_sec, stagger_offset / 1000000);
+    // Token bucket init (fallback, not primary)
+    limiter->tokens_per_sec = bytes_per_sec * 2;  // 2x headroom
+    limiter->max_tokens = limiter->tokens_per_sec / 1000;
+    limiter->tokens = 0;
+    limiter->last_update_ns = get_time_ns();
+
+    printf("[Raw Rate Limiter] Target %u: rate=%u Mbps, pkt_size=%lu, pps=%lu, "
+           "delay=%lu ns (%.1f us), compensation=%lu%%\n",
+           target_id, rate_mbps, avg_pkt_size, packets_per_sec,
+           limiter->delay_ns, (double)limiter->delay_ns / 1000.0, compensation_percent);
 }
 
 // Check if it's time to send next packet (smooth pacing)

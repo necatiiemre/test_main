@@ -154,6 +154,12 @@ struct raw_tx_target_state {
     struct raw_vl_sequence *vl_sequences;    // VL-ID sequence trackers
     uint16_t current_vl_offset;              // Round-robin offset
     struct raw_target_stats stats;           // Per-target statistics
+
+    // Per-target thread (for parallel TX)
+    pthread_t thread;                        // TX thread for this target
+    volatile bool running;                   // Thread running state
+    uint8_t target_index;                    // Index in tx_targets array
+    struct raw_socket_port *port;            // Back-pointer to parent port
 };
 
 // ==========================================
@@ -243,10 +249,9 @@ struct raw_socket_port {
     bool prbs_initialized;
 
     // Thread control
-    pthread_t tx_thread;
+    // Note: TX threads are now per-target (in tx_targets[].thread)
     pthread_t rx_thread;                    // Legacy single RX thread (Port 13)
     volatile bool stop_flag;
-    bool tx_running;
     bool rx_running;
 
     // Hardware MAC address
@@ -281,7 +286,7 @@ void stop_multi_queue_rx_workers(struct raw_socket_port *port);
 // ==========================================
 
 int start_raw_socket_workers(volatile bool *stop_flag);
-void *raw_tx_worker(void *arg);
+void *raw_tx_target_worker(void *arg);  // Per-target TX worker (1 thread per target)
 void *raw_rx_worker(void *arg);
 void stop_raw_socket_workers(void);
 

@@ -976,166 +976,167 @@ int init_raw_socket_ports(void)
 }
 
 // ==========================================
-// TX WORKER (Per-Target with Smooth Pacing)
+// TX WORKER (Multi-Target with Smooth Pacing)
 // ==========================================
-// Each target has its own thread for parallel TX processing
-// Ring buffer is shared between threads with spinlock synchronization
 
-static pthread_spinlock_t tx_ring_lock;  // Shared ring buffer lock
-static bool tx_ring_lock_initialized = false;
-
-void *raw_tx_target_worker(void *arg)
+void *raw_tx_worker(void *arg)
 {
-    struct raw_tx_target_state *target = (struct raw_tx_target_state *)arg;
-    struct raw_socket_port *port = target->port;
-    uint8_t target_idx = target->target_index;
+    struct raw_socket_port *port = (struct raw_socket_port *)arg;
     uint8_t packet_buffer[RAW_PKT_TOTAL_SIZE];  // Max boyut
-    bool first_tx = false;
+    bool first_tx[MAX_RAW_TARGETS] = {false};
 
 #if IMIX_ENABLED
     // IMIX: Worker offset (her target için farklı pattern başlangıcı)
-    // Use target_idx to create unique offset for each target
-    uint8_t imix_offset = (uint8_t)((port->port_id * MAX_RAW_TARGETS + target_idx) % IMIX_PATTERN_SIZE);
+    uint8_t imix_offset = (uint8_t)(port->port_id % IMIX_PATTERN_SIZE);
     uint64_t imix_counter = 0;
-    printf("[Port %u TX T%u] Started (->P%u) IMIX MODE, rate=%u Mbps, offset=%u\n",
-           port->port_id, target_idx, target->config.dest_port,
-           target->config.rate_mbps, imix_offset);
+    printf("[Port %u TX Worker] Started with %u targets (IMIX MODE + SMOOTH PACING, 11 sizes, 16 packets)\n",
+           port->port_id, port->tx_target_count);
+    printf("[Port %u TX] IMIX pattern: 71x2..1514x1 (avg=%d bytes)\n",
+           port->port_id, RAW_IMIX_AVG_PACKET_SIZE);
 #else
-    printf("[Port %u TX T%u] Started (->P%u) rate=%u Mbps\n",
-           port->port_id, target_idx, target->config.dest_port,
-           target->config.rate_mbps);
+    printf("[Port %u TX Worker] Started with %u targets (SMOOTH PACING)\n",
+           port->port_id, port->tx_target_count);
 #endif
 
-    target->running = true;
+    port->tx_running = true;
+
+    // Print target info
+    for (int t = 0; t < port->tx_target_count; t++) {
+        struct raw_tx_target_state *target = &port->tx_targets[t];
+        printf("[Port %u TX] Target %d: rate=%u Mbps, delay=%.2f us, dest_port=%u\n",
+               port->port_id, t, target->config.rate_mbps,
+               (double)target->limiter.delay_ns / 1000.0,
+               target->config.dest_port);
+    }
 
     uint32_t batch_count = 0;
-    const uint32_t BATCH_SIZE = 32;  // Smaller batch per target (was 64 for all)
-    const uint32_t MAX_CATCHUP = 16;  // Max packets per iteration
+    const uint32_t BATCH_SIZE = 64;  // Batch for kernel efficiency
+    const uint32_t MAX_CATCHUP_PER_TARGET = 32;  // Max packets per target per iteration (catch-up limit)
 
     while (!port->stop_flag && (g_stop_flag == NULL || !*g_stop_flag)) {
-        uint32_t sent_count = 0;
+        bool any_sent = false;
 
-        // Send all packets that are due (catch-up), limited to MAX_CATCHUP
-        while (raw_check_smooth_pacing(&target->limiter) && sent_count < MAX_CATCHUP) {
-            // Get current VL-ID
-            uint16_t vl_id = target->config.vl_id_start + target->current_vl_offset;
-            uint16_t vl_index = target->current_vl_offset;
+        // Smooth pacing: Check each target's timing
+        for (int t = 0; t < port->tx_target_count; t++) {
+            struct raw_tx_target_state *target = &port->tx_targets[t];
+            uint32_t sent_this_target = 0;
 
-            // Get next sequence (thread-safe per VL-ID)
-            pthread_spin_lock(&target->vl_sequences[vl_index].tx_lock);
-            uint64_t seq = target->vl_sequences[vl_index].tx_sequence++;
-            pthread_spin_unlock(&target->vl_sequences[vl_index].tx_lock);
+            // Send all packets that are due (catch-up), limited to MAX_CATCHUP_PER_TARGET
+            while (raw_check_smooth_pacing(&target->limiter) &&
+                   sent_this_target < MAX_CATCHUP_PER_TARGET) {
+                // Get current VL-ID
+                uint16_t vl_id = target->config.vl_id_start + target->current_vl_offset;
+                uint16_t vl_index = target->current_vl_offset;
+
+                // Get next sequence (thread-safe)
+                pthread_spin_lock(&target->vl_sequences[vl_index].tx_lock);
+                uint64_t seq = target->vl_sequences[vl_index].tx_sequence++;
+                pthread_spin_unlock(&target->vl_sequences[vl_index].tx_lock);
 
 #if IMIX_ENABLED
-            // IMIX: Paket boyutunu pattern'den al
-            uint16_t pkt_size = get_raw_imix_packet_size(imix_counter, imix_offset);
-            uint16_t prbs_len = calc_raw_prbs_size(pkt_size);
-            imix_counter++;
+                // IMIX: Paket boyutunu pattern'den al
+                uint16_t pkt_size = get_raw_imix_packet_size(imix_counter, imix_offset);
+                uint16_t prbs_len = calc_raw_prbs_size(pkt_size);
+                imix_counter++;
 
-            // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
-            uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
-            uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
+                // IMIX: PRBS offset hesabı HEP MAX boyut ile yapılır
+                uint64_t prbs_offset = (seq * (uint64_t)RAW_MAX_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+                uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
 
-            // Build packet (dinamik boyut)
-            build_raw_packet_dynamic(packet_buffer, port->mac_addr, vl_id, seq,
-                                      prbs_data, prbs_len, pkt_size);
+                // Build packet (dinamik boyut)
+                build_raw_packet_dynamic(packet_buffer, port->mac_addr, vl_id, seq,
+                                          prbs_data, prbs_len, pkt_size);
 #else
-            // Get PRBS data
-            uint64_t prbs_offset = (seq * (uint64_t)RAW_PKT_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
-            uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
+                // Get PRBS data
+                uint64_t prbs_offset = (seq * (uint64_t)RAW_PKT_PRBS_BYTES) % RAW_PRBS_CACHE_SIZE;
+                uint8_t *prbs_data = port->prbs_cache_ext + prbs_offset;
 
-            // Build packet
-            build_raw_packet(packet_buffer, port->mac_addr, vl_id, seq, prbs_data);
-            uint16_t pkt_size = RAW_PKT_TOTAL_SIZE;
+                // Build packet
+                build_raw_packet(packet_buffer, port->mac_addr, vl_id, seq, prbs_data);
+                uint16_t pkt_size = RAW_PKT_TOTAL_SIZE;
 #endif
 
-            // Lock ring buffer for thread-safe access
-            pthread_spin_lock(&tx_ring_lock);
+                // Get TX frame from ring
+                struct tpacket2_hdr *hdr = (struct tpacket2_hdr *)(
+                    (uint8_t *)port->tx_ring +
+                    (port->tx_ring_offset * RAW_SOCKET_RING_FRAME_SIZE));
 
-            // Get TX frame from ring
-            struct tpacket2_hdr *hdr = (struct tpacket2_hdr *)(
-                (uint8_t *)port->tx_ring +
-                (port->tx_ring_offset * RAW_SOCKET_RING_FRAME_SIZE));
-
-            // Check if frame is available
-            if (hdr->tp_status != TP_STATUS_AVAILABLE) {
-                // Flush and retry
-                send(port->tx_socket, NULL, 0, 0);
-                batch_count = 0;
-
-                // Wait briefly and check again
+                // Wait for frame to be available
                 int wait_count = 0;
-                while (hdr->tp_status != TP_STATUS_AVAILABLE && wait_count < 100) {
-                    pthread_spin_unlock(&tx_ring_lock);
-                    struct timespec ts = {0, 100};
-                    nanosleep(&ts, NULL);
-                    pthread_spin_lock(&tx_ring_lock);
-
+                while (hdr->tp_status != TP_STATUS_AVAILABLE) {
                     if (port->stop_flag || (g_stop_flag && *g_stop_flag)) {
-                        pthread_spin_unlock(&tx_ring_lock);
                         goto exit_tx;
                     }
-                    wait_count++;
+                    // Flush pending packets if waiting
+                    if (batch_count > 0) {
+                        send(port->tx_socket, NULL, 0, 0);
+                        batch_count = 0;
+                    }
+                    if (++wait_count > 100) {
+                        struct pollfd pfd = {port->tx_socket, POLLOUT, 0};
+                        poll(&pfd, 1, 1);
+                        wait_count = 0;
+                    }
                 }
 
-                if (hdr->tp_status != TP_STATUS_AVAILABLE) {
-                    pthread_spin_unlock(&tx_ring_lock);
-                    break;  // Try again next iteration
+                // Copy packet to ring buffer (dinamik boyut)
+                uint8_t *frame_data = (uint8_t *)hdr + TPACKET2_HDRLEN - sizeof(struct sockaddr_ll);
+                memcpy(frame_data, packet_buffer, pkt_size);
+                hdr->tp_len = pkt_size;
+                hdr->tp_status = TP_STATUS_SEND_REQUEST;
+
+                // Update stats
+                pthread_spin_lock(&target->stats.lock);
+                target->stats.tx_packets++;
+                target->stats.tx_bytes += pkt_size;
+                pthread_spin_unlock(&target->stats.lock);
+
+                if (!first_tx[t]) {
+                    printf("[Port %u TX] Target %d (->P%u): First packet VL-ID=%u Seq=%lu\n",
+                           port->port_id, t, target->config.dest_port, vl_id, seq);
+                    first_tx[t] = true;
+                }
+
+                // Advance ring offset
+                port->tx_ring_offset = (port->tx_ring_offset + 1) % RAW_SOCKET_RING_FRAME_NR;
+
+                // Round-robin through VL-IDs
+                target->current_vl_offset = (target->current_vl_offset + 1) % target->config.vl_id_count;
+                any_sent = true;
+                batch_count++;
+                sent_this_target++;
+
+                // Flush batch periodically
+                if (batch_count >= BATCH_SIZE) {
+                    if (send(port->tx_socket, NULL, 0, 0) < 0) {
+                        pthread_spin_lock(&target->stats.lock);
+                        target->stats.tx_errors++;
+                        pthread_spin_unlock(&target->stats.lock);
+                    }
+                    batch_count = 0;
                 }
             }
-
-            // Copy packet to ring buffer
-            uint8_t *frame_data = (uint8_t *)hdr + TPACKET2_HDRLEN - sizeof(struct sockaddr_ll);
-            memcpy(frame_data, packet_buffer, pkt_size);
-            hdr->tp_len = pkt_size;
-            hdr->tp_status = TP_STATUS_SEND_REQUEST;
-
-            // Advance ring offset
-            port->tx_ring_offset = (port->tx_ring_offset + 1) % RAW_SOCKET_RING_FRAME_NR;
-            batch_count++;
-
-            // Flush batch periodically (while holding lock)
-            if (batch_count >= BATCH_SIZE) {
-                send(port->tx_socket, NULL, 0, 0);
-                batch_count = 0;
-            }
-
-            pthread_spin_unlock(&tx_ring_lock);
-
-            // Update stats (outside lock for better parallelism)
-            pthread_spin_lock(&target->stats.lock);
-            target->stats.tx_packets++;
-            target->stats.tx_bytes += pkt_size;
-            pthread_spin_unlock(&target->stats.lock);
-
-            if (!first_tx) {
-                printf("[Port %u TX T%u] First packet: VL-ID=%u Seq=%lu Size=%u\n",
-                       port->port_id, target_idx, vl_id, seq, pkt_size);
-                first_tx = true;
-            }
-
-            // Round-robin through VL-IDs
-            target->current_vl_offset = (target->current_vl_offset + 1) % target->config.vl_id_count;
-            sent_count++;
         }
 
-        // Small sleep if nothing was sent
-        if (sent_count == 0) {
-            struct timespec ts = {0, 500};  // 500ns sleep
+        // Flush any remaining packets
+        if (batch_count > 0) {
+            send(port->tx_socket, NULL, 0, 0);
+            batch_count = 0;
+        }
+
+        if (!any_sent) {
+            struct timespec ts = {0, 100};  // 100ns sleep (was 1µs)
             nanosleep(&ts, NULL);
         }
     }
 
 exit_tx:
     // Flush remaining
-    pthread_spin_lock(&tx_ring_lock);
     if (batch_count > 0) {
         send(port->tx_socket, NULL, 0, 0);
     }
-    pthread_spin_unlock(&tx_ring_lock);
-
-    printf("[Port %u TX T%u] Stopped\n", port->port_id, target_idx);
-    target->running = false;
+    printf("[Port %u TX Worker] Stopped\n", port->port_id);
+    port->tx_running = false;
     return NULL;
 }
 
@@ -2005,15 +2006,9 @@ void stop_multi_queue_rx_workers(struct raw_socket_port *port)
 
 int start_raw_socket_workers(volatile bool *stop_flag)
 {
-    printf("\n=== Starting Raw Socket Workers (Per-Target TX) ===\n");
+    printf("\n=== Starting Raw Socket Workers (Multi-Target) ===\n");
 
     g_stop_flag = stop_flag;
-
-    // Initialize shared TX ring lock (once)
-    if (!tx_ring_lock_initialized) {
-        pthread_spin_init(&tx_ring_lock, PTHREAD_PROCESS_PRIVATE);
-        tx_ring_lock_initialized = true;
-    }
 
     // Start RX workers
     for (int i = 0; i < MAX_RAW_SOCKET_PORTS; i++) {
@@ -2038,29 +2033,11 @@ int start_raw_socket_workers(volatile bool *stop_flag)
 
     usleep(100000);  // 100ms
 
-    // Start TX workers - ONE THREAD PER TARGET for parallel processing
+    // Start TX workers
     for (int i = 0; i < MAX_RAW_SOCKET_PORTS; i++) {
-        struct raw_socket_port *port = &raw_ports[i];
-
-        printf("[Port %u] Starting %u TX target threads\n", port->port_id, port->tx_target_count);
-
-        for (int t = 0; t < port->tx_target_count; t++) {
-            struct raw_tx_target_state *target = &port->tx_targets[t];
-
-            // Set back-pointer and index
-            target->port = port;
-            target->target_index = t;
-            target->running = false;
-
-            // Create per-target TX thread
-            if (pthread_create(&target->thread, NULL, raw_tx_target_worker, target) != 0) {
-                fprintf(stderr, "[Port %u] Failed to create TX thread for target %d\n",
-                        port->port_id, t);
-                return -1;
-            }
-
-            // Small stagger between target thread starts
-            usleep(10000);  // 10ms
+        if (pthread_create(&raw_ports[i].tx_thread, NULL, raw_tx_worker, &raw_ports[i]) != 0) {
+            fprintf(stderr, "[Port %u] Failed to create TX thread\n", raw_ports[i].port_id);
+            return -1;
         }
     }
 
@@ -2079,30 +2056,19 @@ void stop_raw_socket_workers(void)
 
     // Wait for all workers to finish
     for (int i = 0; i < MAX_RAW_SOCKET_PORTS; i++) {
-        struct raw_socket_port *port = &raw_ports[i];
-
-        // Stop all TX target threads
-        for (int t = 0; t < port->tx_target_count; t++) {
-            struct raw_tx_target_state *target = &port->tx_targets[t];
-            if (target->running) {
-                pthread_join(target->thread, NULL);
-            }
+        // Stop TX thread
+        if (raw_ports[i].tx_running) {
+            pthread_join(raw_ports[i].tx_thread, NULL);
         }
 
         // Stop RX - multi-queue or legacy
-        if (port->use_multi_queue_rx) {
-            stop_multi_queue_rx_workers(port);
+        if (raw_ports[i].use_multi_queue_rx) {
+            stop_multi_queue_rx_workers(&raw_ports[i]);
         } else {
-            if (port->rx_running) {
-                pthread_join(port->rx_thread, NULL);
+            if (raw_ports[i].rx_running) {
+                pthread_join(raw_ports[i].rx_thread, NULL);
             }
         }
-    }
-
-    // Cleanup spinlock
-    if (tx_ring_lock_initialized) {
-        pthread_spin_destroy(&tx_ring_lock);
-        tx_ring_lock_initialized = false;
     }
 
     printf("=== All Raw Socket Workers Stopped ===\n");

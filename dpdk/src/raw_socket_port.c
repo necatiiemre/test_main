@@ -317,10 +317,10 @@ bool raw_check_smooth_pacing(struct raw_rate_limiter *limiter)
 {
     if (!limiter->smooth_pacing_enabled) {
 #if IMIX_ENABLED
-        // IMIX: Just check if we have enough tokens for minimum packet
-        // Actual consumption happens after we know the packet size
+        // IMIX: Check if we have enough tokens for average packet size
+        // This ensures accurate byte-based rate limiting
         update_raw_tokens(limiter);
-        return (limiter->tokens >= RAW_IMIX_SIZE_01);  // Minimum IMIX size
+        return (limiter->tokens >= RAW_IMIX_AVG_PACKET_SIZE);
 #else
         return raw_consume_tokens(limiter, RAW_PKT_TOTAL_SIZE);
 #endif

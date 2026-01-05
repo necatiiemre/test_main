@@ -2109,8 +2109,12 @@ static int latency_rx_worker(void *arg)
             uint8_t *payload = pkt + payload_offset;
             uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
 
-            // Extract VL-ID from DST MAC
+            // Extract VL-ID from DST MAC (bytes 4-5)
             uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+
+            // Debug: Print received packet info
+            printf("  RX DEBUG: Port %u got pkt, DST MAC: %02x:%02x:%02x:%02x:%02x:%02x, VL-ID extracted: %u, src_port: %u\n",
+                   port_id, pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], vl_id, src_port_id);
 
             // Find matching result in source port's results
             bool found = false;
@@ -2126,7 +2130,7 @@ static int latency_rx_worker(void *arg)
                     // PRBS verification disabled for latency test
                     result->prbs_ok = true;
 
-                    printf("  RX: Port %u <- VL-ID %u, Latency %.2f us\n",
+                    printf("  RX MATCH: Port %u <- VL-ID %u, Latency %.2f us\n",
                            port_id, vl_id, result->latency_us);
 
                     received_count++;
@@ -2136,7 +2140,14 @@ static int latency_rx_worker(void *arg)
             }
 
             if (!found) {
-                printf("  RX: Unexpected packet on port %u, VL-ID %u\n", port_id, vl_id);
+                printf("  RX NO MATCH: Port %u, VL-ID %u, expected from port %u (test_count=%u)\n",
+                       port_id, vl_id, src_port_id, g_latency_test.ports[src_port_id].test_count);
+                // Print expected VL-IDs
+                for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
+                    printf("    Expected[%u]: VL-ID %u, received=%d\n",
+                           r, g_latency_test.ports[src_port_id].results[r].vl_id,
+                           g_latency_test.ports[src_port_id].results[r].received);
+                }
             }
 
             rte_pktmbuf_free(m);

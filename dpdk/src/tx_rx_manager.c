@@ -1976,7 +1976,7 @@ static uint16_t get_latency_paired_port(uint16_t port_id)
 }
 
 /**
- * Latency test TX worker - sends test packets in burst mode
+ * Latency test TX worker - sends test packets one by one with individual timestamps
  */
 static int latency_tx_worker(void *arg)
 {
@@ -2004,12 +2004,10 @@ static int latency_tx_worker(void *arg)
     g_latency_test.ports[port_id].port_id = port_id;
     g_latency_test.ports[port_id].test_count = vlan_count;
 
-    // Allocate mbufs for all packets in burst
-    struct rte_mbuf *mbufs[BURST_SIZE];
-    uint16_t nb_pkts = 0;
+    uint16_t sent_count = 0;
 
-    // Build all packets first
-    for (uint16_t v = 0; v < vlan_count && nb_pkts < BURST_SIZE; v++) {
+    // Send one packet per VLAN with individual timestamps
+    for (uint16_t v = 0; v < vlan_count; v++) {
         uint16_t vlan_id = vlan_cfg->tx_vlans[v];
         uint16_t vl_id = vlan_cfg->tx_vl_ids[v];
 
@@ -2020,47 +2018,36 @@ static int latency_tx_worker(void *arg)
             continue;
         }
 
-        mbufs[nb_pkts] = mbuf;
-        nb_pkts++;
-    }
+        // Get TX timestamp just before building and sending
+        uint64_t tx_timestamp = rte_rdtsc();
 
-    if (nb_pkts == 0) {
-        printf("Error: No packets allocated for port %u\n", port_id);
-        g_latency_test.ports[port_id].tx_complete = true;
-        return -1;
-    }
-
-    // Get TX timestamp for all packets in this burst (same timestamp for simplicity)
-    uint64_t tx_timestamp = rte_rdtsc();
-
-    // Build all packets with the same timestamp
-    for (uint16_t v = 0; v < nb_pkts; v++) {
-        uint16_t vlan_id = vlan_cfg->tx_vlans[v];
-        uint16_t vl_id = vlan_cfg->tx_vl_ids[v];
-
-        build_latency_test_packet(mbufs[v], port_id, vlan_id, vl_id, v, tx_timestamp);
+        // Build packet with current timestamp
+        build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, v, tx_timestamp);
 
         // Update result with TX timestamp
         struct latency_result *result = &g_latency_test.ports[port_id].results[v];
         result->tx_timestamp = tx_timestamp;
 
-        printf("  Prepared: Port %u -> VLAN %u, VL-ID %u, Seq %u\n",
-               port_id, vlan_id, vl_id, v);
-    }
+        // Send packet immediately
+        uint16_t nb_tx = rte_eth_tx_burst(port_id, params->queue_id, &mbuf, 1);
+        if (nb_tx == 0) {
+            printf("Error: Failed to send packet on port %u VLAN %u\n", port_id, vlan_id);
+            rte_pktmbuf_free(mbuf);
+        } else {
+            sent_count++;
+            printf("  TX: Port %u -> VLAN %u, VL-ID %u, Seq %u\n",
+                   port_id, vlan_id, vl_id, v);
+        }
 
-    // Send all packets in burst
-    uint16_t nb_tx = rte_eth_tx_burst(port_id, params->queue_id, mbufs, nb_pkts);
-    printf("  TX Burst: Port %u sent %u/%u packets, Timestamp %lu\n",
-           port_id, nb_tx, nb_pkts, tx_timestamp);
+        // Force TX descriptor cleanup to flush the packet
+        rte_eth_tx_done_cleanup(port_id, params->queue_id, 0);
 
-    // Free any unsent packets
-    for (uint16_t i = nb_tx; i < nb_pkts; i++) {
-        printf("Error: Failed to send packet %u on port %u\n", i, port_id);
-        rte_pktmbuf_free(mbufs[i]);
+        // Small delay to allow packet to be transmitted
+        rte_delay_us(50);
     }
 
     g_latency_test.ports[port_id].tx_complete = true;
-    printf("Latency TX Worker completed: Port %u (%u packets sent)\n", port_id, nb_tx);
+    printf("Latency TX Worker completed: Port %u (%u packets sent)\n", port_id, sent_count);
     return 0;
 }
 

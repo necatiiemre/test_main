@@ -2224,6 +2224,36 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     g_latency_test.test_running = true;
     g_latency_test.test_start_time = rte_rdtsc();
 
+    // Pre-initialize test_count and vl_id values for all ports BEFORE starting workers
+    // This fixes the race condition where RX workers check test_count before TX workers set it
+    printf("=== Pre-initializing Latency Test Data ===\n");
+    for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+        struct port *port = &ports_config->ports[i];
+        uint16_t port_id = port->port_id;
+
+        if (port_id >= MAX_PORTS_CONFIG) continue;
+
+        struct port_vlan_config *vlan_cfg = &port_vlans[port_id];
+        uint16_t vlan_count = vlan_cfg->tx_vlan_count;
+
+        g_latency_test.ports[port_id].port_id = port_id;
+        g_latency_test.ports[port_id].test_count = vlan_count;
+
+        // Pre-populate results with expected vl_id values
+        for (uint16_t v = 0; v < vlan_count; v++) {
+            struct latency_result *result = &g_latency_test.ports[port_id].results[v];
+            result->tx_port = port_id;
+            result->rx_port = get_latency_paired_port(port_id);
+            result->vlan_id = vlan_cfg->tx_vlans[v];
+            result->vl_id = vlan_cfg->tx_vl_ids[v];
+            result->received = false;
+            result->prbs_ok = false;
+        }
+
+        printf("  Port %u: %u VLANs initialized\n", port_id, vlan_count);
+    }
+    printf("\n");
+
     // Worker parameters storage
     static struct tx_worker_params tx_params[MAX_PORTS];
     static struct rx_worker_params rx_params[MAX_PORTS];

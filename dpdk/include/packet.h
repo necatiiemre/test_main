@@ -38,6 +38,27 @@
 #define SEQ_BYTES         8
 
 // ==========================================
+// LATENCY TEST PAYLOAD FORMAT
+// ==========================================
+// Normal mod:
+//   [Sequence 8B][PRBS Data 1459B]
+//
+// Latency test modu:
+//   [Sequence 8B][TX Timestamp 8B][PRBS Data 1451B]
+//
+// TX Timestamp = rte_rdtsc() (CPU cycle counter)
+
+#define TX_TIMESTAMP_BYTES      8
+#define LATENCY_PAYLOAD_OFFSET  (SEQ_BYTES + TX_TIMESTAMP_BYTES)  // 16 bytes header
+
+// Latency test modunda PRBS boyutu (1518 - 18 - 20 - 8 - 16 = 1456)
+#if VLAN_ENABLED
+#define LATENCY_PRBS_BYTES  (LATENCY_TEST_PACKET_SIZE - ETH_HDR_SIZE - VLAN_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE - SEQ_BYTES - TX_TIMESTAMP_BYTES)
+#else
+#define LATENCY_PRBS_BYTES  (LATENCY_TEST_PACKET_SIZE - ETH_HDR_SIZE - IP_HDR_SIZE - UDP_HDR_SIZE - SEQ_BYTES - TX_TIMESTAMP_BYTES)
+#endif
+
+// ==========================================
 // PAYLOAD & PACKET SIZES
 // ==========================================
 #define PAYLOAD_SIZE_NO_VLAN 1471  // 8 seq + 1463 prbs

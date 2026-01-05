@@ -207,7 +207,37 @@ int main(int argc, char const *argv[])
     printf("  Payload per packet: %u bytes (SEQ: %u + PRBS: %u)\n",
            PAYLOAD_SIZE, SEQ_BYTES, NUM_PRBS_BYTES);
     printf("  Sequence Validation: ENABLED\n");
+#if LATENCY_TEST_ENABLED
+    printf("  Latency Test: ENABLED (will run before normal mode)\n");
+#endif
     printf("\n");
+
+#if LATENCY_TEST_ENABLED
+    // *** LATENCY TEST - RUNS BEFORE NORMAL MODE ***
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║            LATENCY TEST MODE ENABLED                             ║\n");
+    printf("║  Her VLAN'dan 1 paket gonderilecek, latency olculecek           ║\n");
+    printf("║  Test sonrasi normal moda gecilecek                              ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    int latency_ret = start_latency_test(&ports_config, &force_quit);
+    if (latency_ret < 0) {
+        printf("Warning: Latency test failed, continuing with normal mode\n");
+    }
+
+    // Check if user pressed Ctrl+C during latency test
+    if (force_quit) {
+        printf("User interrupted during latency test, exiting...\n");
+        cleanup_prbs_cache();
+        cleanup_ports(&ports_config);
+        cleanup_eal();
+        return 0;
+    }
+
+    printf("\n=== Latency test complete, starting normal TX/RX workers ===\n\n");
+#endif
 
     int start_ret = start_txrx_workers(&ports_config, &force_quit);
     if (start_ret < 0)

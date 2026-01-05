@@ -211,4 +211,64 @@ void print_port_stats(struct ports_config *ports_config);
  */
 void init_rx_stats(void);
 
+// ==========================================
+// LATENCY TEST STRUCTURES & FUNCTIONS
+// ==========================================
+
+#if LATENCY_TEST_ENABLED
+
+// Tek bir latency ölçüm sonucu
+struct latency_result {
+    uint16_t tx_port;           // Gönderen port
+    uint16_t rx_port;           // Alan port
+    uint16_t vlan_id;           // VLAN ID
+    uint16_t vl_id;             // VL-ID
+    uint64_t tx_timestamp;      // TX zamanı (TSC cycles)
+    uint64_t rx_timestamp;      // RX zamanı (TSC cycles)
+    uint64_t latency_cycles;    // Gecikme (cycles)
+    double   latency_us;        // Gecikme (mikrosaniye)
+    bool     received;          // Paket alındı mı?
+    bool     prbs_ok;           // PRBS doğrulama başarılı mı?
+};
+
+// Port başına latency test durumu
+#define MAX_LATENCY_TESTS_PER_PORT 32  // Max VLAN sayısı kadar
+
+struct port_latency_test {
+    uint16_t port_id;
+    uint16_t test_count;                                    // Bu port için test sayısı
+    struct latency_result results[MAX_LATENCY_TESTS_PER_PORT];
+    volatile bool tx_complete;                              // TX tamamlandı mı?
+    volatile bool rx_complete;                              // Tüm RX tamamlandı mı?
+};
+
+// Global latency test durumu
+struct latency_test_state {
+    volatile bool test_running;             // Test devam ediyor mu?
+    volatile bool test_complete;            // Test tamamlandı mı?
+    uint64_t tsc_hz;                        // TSC frekansı (cycles/sec)
+    uint64_t test_start_time;               // Test başlangıç zamanı
+    struct port_latency_test ports[MAX_PORTS];
+};
+
+extern struct latency_test_state g_latency_test;
+
+/**
+ * Latency testi başlat
+ * Her port için her VLAN'dan 1 paket gönderir
+ */
+int start_latency_test(struct ports_config *ports_config, volatile bool *stop_flag);
+
+/**
+ * Latency test sonuçlarını yazdır
+ */
+void print_latency_results(void);
+
+/**
+ * Latency test durumunu sıfırla
+ */
+void reset_latency_test(void);
+
+#endif /* LATENCY_TEST_ENABLED */
+
 #endif /* TX_RX_MANAGER_H */

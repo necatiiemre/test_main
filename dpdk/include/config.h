@@ -6,6 +6,24 @@
 #define stringify(x) #x
 
 // ==========================================
+// LATENCY TEST CONFIGURATION
+// ==========================================
+// Etkinleştirildiğinde:
+// - Her VLAN'dan 1 paket gönderilir (ilk VL-ID kullanılır)
+// - TX timestamp payload'a yazılır
+// - RX'te latency hesaplanır ve gösterilir
+// - 5 saniye timeout
+// - Test sonrası normal moda geçilir
+// - IMIX devre dışı, MAX paket boyutu (1518) kullanılır
+
+#ifndef LATENCY_TEST_ENABLED
+#define LATENCY_TEST_ENABLED 0
+#endif
+
+#define LATENCY_TEST_TIMEOUT_SEC 5          // Paket bekleme timeout (saniye)
+#define LATENCY_TEST_PACKET_SIZE 1518       // Test paketi boyutu (MAX)
+
+// ==========================================
 // IMIX (Internet Mix) CONFIGURATION
 // ==========================================
 // Özel IMIX profili: Farklı paket boyutlarının dağılımı

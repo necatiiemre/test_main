@@ -4,16 +4,6 @@
 #include "port.h"
 #include "config.h"
 
-// ==========================================
-// HARDWARE TIMESTAMP CONFIGURATION
-// ==========================================
-#if LATENCY_TEST_ENABLED
-// Enable hardware RX timestamp offload for latency test
-#define ENABLE_HW_TIMESTAMP 1
-#else
-#define ENABLE_HW_TIMESTAMP 0
-#endif
-
 int initialize_ports(struct ports_config *config)
 {
     uint16_t port_id;
@@ -193,29 +183,11 @@ void print_ports_by_card(const struct ports_config *config)
 int configure_port(uint16_t port_id)
 {
     struct rte_eth_conf port_conf = {0};
-    struct rte_eth_dev_info dev_info;
     int ret;
-
-    // Get device info to check supported offloads
-    ret = rte_eth_dev_info_get(port_id, &dev_info);
-    if (ret != 0) {
-        printf("Error: Cannot get device info for port %u\n", port_id);
-        return ret;
-    }
 
     // Basic port configuration
     port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
     port_conf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
-
-#if ENABLE_HW_TIMESTAMP
-    // Check if hardware timestamp offload is supported
-    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
-        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
-        printf("Port %u: Hardware RX timestamp offload enabled\n", port_id);
-    } else {
-        printf("Port %u: Hardware RX timestamp not supported by driver\n", port_id);
-    }
-#endif
 
     // Configure the port
     ret = rte_eth_dev_configure(port_id, 1, 1, &port_conf);
@@ -382,45 +354,3 @@ void cleanup_ports(struct ports_config *config)
     memset(config, 0, sizeof(struct ports_config));
     printf("Ports cleanup completed\n");
 }
-
-#if LATENCY_TEST_ENABLED
-/**
- * Enable hardware timesync on a port (for hardware timestamps)
- * Must be called after port is started
- */
-int enable_port_timesync(uint16_t port_id)
-{
-    int ret = rte_eth_timesync_enable(port_id);
-    if (ret == 0) {
-        printf("Port %u: Timesync (hardware timestamp) enabled\n", port_id);
-        return 0;
-    } else if (ret == -ENOTSUP) {
-        printf("Port %u: Timesync not supported by driver\n", port_id);
-        return -1;
-    } else {
-        printf("Port %u: Failed to enable timesync: %s\n", port_id, rte_strerror(-ret));
-        return ret;
-    }
-}
-
-/**
- * Enable timesync on all ports
- */
-int enable_all_ports_timesync(struct ports_config *config)
-{
-    int success_count = 0;
-
-    printf("\n=== Enabling Hardware Timesync on All Ports ===\n");
-
-    for (uint16_t i = 0; i < config->nb_ports; i++) {
-        if (config->ports[i].is_valid) {
-            if (enable_port_timesync(config->ports[i].port_id) == 0) {
-                success_count++;
-            }
-        }
-    }
-
-    printf("Timesync enabled on %d/%u ports\n\n", success_count, config->nb_ports);
-    return success_count;
-}
-#endif /* LATENCY_TEST_ENABLED */

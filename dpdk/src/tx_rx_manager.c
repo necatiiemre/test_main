@@ -6,57 +6,8 @@
 #include <rte_cycles.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
-#include <rte_mbuf_dyn.h>     // For hardware timestamp dynamic field
 #include <stdlib.h>
 #include <string.h>
-
-// ==========================================
-// HARDWARE TIMESTAMP SUPPORT (DPDK 24.11.1)
-// ==========================================
-#if LATENCY_TEST_ENABLED
-
-// Dynamic field offset for hardware RX timestamp
-static int hwts_dynfield_offset = -1;
-
-// Dynamic field descriptor for timestamp
-static const struct rte_mbuf_dynfield hwts_dynfield_desc = {
-    .name = "rte_dynfield_timestamp",
-    .size = sizeof(uint64_t),
-    .align = __alignof__(uint64_t),
-};
-
-// Flag to track if hardware timestamp is available
-static volatile bool g_hwts_enabled = false;
-
-/**
- * Initialize hardware timestamp dynamic field
- * Must be called before port configuration
- */
-static int init_hwts_dynfield(void)
-{
-    hwts_dynfield_offset = rte_mbuf_dynfield_register(&hwts_dynfield_desc);
-    if (hwts_dynfield_offset < 0) {
-        printf("Warning: Could not register timestamp dynamic field: %s\n",
-               rte_strerror(rte_errno));
-        printf("         Will use software TSC timestamps instead\n");
-        return -1;
-    }
-    printf("Hardware timestamp dynamic field registered at offset %d\n", hwts_dynfield_offset);
-    return 0;
-}
-
-/**
- * Get hardware timestamp from mbuf
- * Returns 0 if hardware timestamp not available
- */
-static inline uint64_t get_hwts_from_mbuf(struct rte_mbuf *mbuf)
-{
-    if (hwts_dynfield_offset < 0)
-        return 0;
-    return *RTE_MBUF_DYNFIELD(mbuf, hwts_dynfield_offset, uint64_t *);
-}
-
-#endif /* LATENCY_TEST_ENABLED */
 
 // ==========================================
 // GLOBAL VARIABLES
@@ -2082,9 +2033,15 @@ static int latency_tx_worker(void *arg)
     rte_delay_us(500);
 
     // ============ ACTUAL TEST ============
-    printf("  Port %u: Sending 1 packet per VLAN (%u VLANs)...\n", port_id, vlan_count);
+    // Send multiple packets per VLAN to eliminate first-packet overhead
+    // RX will record minimum latency (first packet absorbs overhead)
+    #define PACKETS_PER_VLAN 4
+    #define PACKET_DELAY_US 16  // Delay between packets in same VLAN
 
-    // Send 1 packet per VLAN using first VL-ID
+    printf("  Port %u: Sending %u packets per VLAN (%u VLANs)...\n",
+           port_id, PACKETS_PER_VLAN, vlan_count);
+
+    // Send multiple packets per VLAN using first VL-ID
     for (uint16_t v = 0; v < vlan_count; v++) {
         uint16_t vlan_id = vlan_cfg->tx_vlans[v];
         uint16_t vl_id = vlan_cfg->tx_vl_ids[v];  // First VL-ID for this VLAN
@@ -2092,45 +2049,42 @@ static int latency_tx_worker(void *arg)
         struct latency_result *result = &g_latency_test.ports[port_id].results[v];
         result->tx_count = 0;
 
-        // Allocate single packet
-        struct rte_mbuf *mbuf = rte_pktmbuf_alloc(params->mbuf_pool);
-        if (!mbuf) {
-            printf("  Error: Failed to allocate mbuf for Port %u VLAN %u\n", port_id, vlan_id);
-            continue;
-        }
-
-        // Get TX timestamp - use hardware clock if timesync is enabled
-        uint64_t tx_timestamp;
-        if (g_hwts_enabled) {
-            // Read NIC hardware clock for consistent timestamp domain with RX
-            int ret = rte_eth_read_clock(port_id, &tx_timestamp);
-            if (ret != 0) {
-                // Fallback to software timestamp
-                tx_timestamp = rte_rdtsc();
+        // Send multiple packets per VLAN
+        for (uint16_t p = 0; p < PACKETS_PER_VLAN; p++) {
+            struct rte_mbuf *mbuf = rte_pktmbuf_alloc(params->mbuf_pool);
+            if (!mbuf) {
+                printf("  Error: Failed to allocate mbuf for Port %u VLAN %u pkt %u\n",
+                       port_id, vlan_id, p);
+                continue;
             }
-        } else {
-            tx_timestamp = rte_rdtsc();
+
+            // Get TX timestamp using TSC
+            uint64_t tx_timestamp = rte_rdtsc();
+
+            // Build packet with sequence number = p
+            build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, tx_timestamp);
+
+            // Send packet - try all TX queues until success
+            uint16_t nb_tx = 0;
+            for (uint16_t q = 0; q < NUM_TX_CORES && nb_tx == 0; q++) {
+                nb_tx = rte_eth_tx_burst(port_id, q, &mbuf, 1);
+            }
+
+            if (nb_tx == 0) {
+                rte_pktmbuf_free(mbuf);
+            } else {
+                result->tx_count++;
+                result->tx_timestamp = tx_timestamp;  // Last TX timestamp
+            }
+
+            // Small delay between packets in same VLAN
+            rte_delay_us(PACKET_DELAY_US);
         }
 
-        // Build packet
-        build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, 0, tx_timestamp);
+        printf("  TX: Port %u -> VLAN %u, VL-ID %u (%u packets)\n",
+               port_id, vlan_id, vl_id, result->tx_count);
 
-        // Send packet - try all TX queues until success
-        uint16_t nb_tx = 0;
-        for (uint16_t q = 0; q < NUM_TX_CORES && nb_tx == 0; q++) {
-            nb_tx = rte_eth_tx_burst(port_id, q, &mbuf, 1);
-        }
-
-        if (nb_tx == 0) {
-            rte_pktmbuf_free(mbuf);
-            printf("  TX FAILED: Port %u -> VLAN %u, VL-ID %u\n", port_id, vlan_id, vl_id);
-        } else {
-            result->tx_count = 1;
-            result->tx_timestamp = tx_timestamp;
-            printf("  TX: Port %u -> VLAN %u, VL-ID %u\n", port_id, vlan_id, vl_id);
-        }
-
-        // 32 microsecond delay between VLAN packets
+        // Larger delay between different VLANs
         rte_delay_us(32);
     }
 
@@ -2142,7 +2096,6 @@ static int latency_tx_worker(void *arg)
 /**
  * Latency test RX worker - FAST POLLING mode for accurate latency measurement
  * Uses round-robin queue order to eliminate queue bias
- * Supports hardware timestamps when available (mlx5 driver)
  */
 static int latency_rx_worker(void *arg)
 {
@@ -2153,11 +2106,8 @@ static int latency_rx_worker(void *arg)
     // Poll ALL RX queues to handle RSS distribution
     const uint16_t num_rx_queues = NUM_RX_CORES;
 
-    // Check if hardware timestamp is available
-    const bool use_hwts = (hwts_dynfield_offset >= 0) && g_hwts_enabled;
-
-    printf("Latency RX Worker started: Port %u (FAST POLLING mode, %u queues, %s timestamps)\n",
-           port_id, num_rx_queues, use_hwts ? "HARDWARE" : "SOFTWARE");
+    printf("Latency RX Worker started: Port %u (FAST POLLING mode, %u queues)\n",
+           port_id, num_rx_queues);
 
 #if VLAN_ENABLED
     const uint16_t l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
@@ -2206,22 +2156,8 @@ static int latency_rx_worker(void *arg)
                     continue;
                 }
 
-                // Get RX timestamp - use hardware timestamp if available
-                uint64_t rx_timestamp;
-                bool hwts_used = false;
-
-                if (use_hwts) {
-                    uint64_t hwts = get_hwts_from_mbuf(m);
-                    if (hwts != 0) {
-                        rx_timestamp = hwts;
-                        hwts_used = true;
-                    } else {
-                        // Fallback to software timestamp if hardware timestamp is 0
-                        rx_timestamp = rte_rdtsc();
-                    }
-                } else {
-                    rx_timestamp = rte_rdtsc();
-                }
+                // Get RX timestamp immediately
+                uint64_t rx_timestamp = rte_rdtsc();
 
                 // Extract TX timestamp from payload
                 uint8_t *payload = pkt + payload_offset;
@@ -2230,20 +2166,8 @@ static int latency_rx_worker(void *arg)
                 // Extract VL-ID from DST MAC (bytes 4-5)
                 uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
 
-                // Calculate latency
-                // Note: When hardware timestamps are used, both TX (from rte_eth_read_clock)
-                //       and RX (from mbuf dynamic field) are in NIC clock cycles
-                //       mlx5 NIC clock is typically 1 GHz (1 cycle = 1 nanosecond)
-                double latency_us;
-                if (hwts_used) {
-                    // Hardware timestamp: NIC clock cycles (typically 1 GHz = 1ns per cycle)
-                    // Convert nanoseconds to microseconds
-                    int64_t latency_cycles = (int64_t)(rx_timestamp - tx_timestamp);
-                    latency_us = (double)latency_cycles / 1000.0;  // ns to us
-                } else {
-                    // Software timestamp: use TSC frequency
-                    latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
-                }
+                // Calculate latency using TSC cycles
+                double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
 
                 // Find matching result in source port's results
                 for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
@@ -2296,22 +2220,20 @@ static int latency_rx_worker(void *arg)
 }
 
 /**
- * Print latency test results - per-VLAN single packet
+ * Print latency test results - per-VLAN with minimum latency (eliminates first-packet overhead)
  */
 void print_latency_results(void)
 {
     printf("\n");
-    printf("╔═══════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                    LATENCY TEST SONUCLARI (Tek Paket)                     ║\n");
-    printf("║            Timestamp mode: %-10s                                     ║\n",
-           g_hwts_enabled ? "HARDWARE" : "SOFTWARE");
-    printf("╠══════════╦══════════╦══════════╦══════════╦════════════════╦══════════════╣\n");
-    printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (us)  ║    Durum     ║\n");
-    printf("╠══════════╬══════════╬══════════╬══════════╬════════════════╬══════════════╣\n");
+    printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                    LATENCY TEST SONUCLARI (Minimum Latency)                              ║\n");
+    printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
+    printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  RX/TX   ║\n");
+    printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
 
     uint32_t total_tx = 0;
     uint32_t total_rx = 0;
-    double total_latency = 0.0;
+    double total_min_latency = 0.0;
 
     for (uint16_t p = 0; p < MAX_PORTS; p++) {
         struct port_latency_test *port_test = &g_latency_test.ports[p];
@@ -2324,30 +2246,32 @@ void print_latency_results(void)
 
             if (result->received && result->rx_count > 0) {
                 total_rx++;
-                double latency = result->sum_latency_us / result->rx_count;
-                total_latency += latency;
+                double avg_latency = result->sum_latency_us / result->rx_count;
+                total_min_latency += result->min_latency_us;
 
-                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║    %10.2f  ║   BASARILI   ║\n",
-                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id, latency);
+                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║   %7.2f ║   %7.2f ║   %7.2f ║   %2u/%-2u  ║\n",
+                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id,
+                       result->min_latency_us, avg_latency, result->max_latency_us,
+                       result->rx_count, result->tx_count);
             } else {
-                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║        -       ║   TIMEOUT    ║\n",
-                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id);
+                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║       -   ║       -   ║       -   ║   0/%-2u   ║\n",
+                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id, result->tx_count);
             }
         }
     }
 
-    printf("╠══════════╩══════════╩══════════╩══════════╩════════════════╩══════════════╣\n");
+    printf("╠══════════╩══════════╩══════════╩══════════╩═══════════╩═══════════╩═══════════╩══════════╣\n");
 
     if (total_rx > 0) {
-        double avg_latency = total_latency / total_rx;
-        printf("║  OZET: %u/%u basarili | Ortalama: %.2f us                               ║\n",
-               total_rx, total_tx, avg_latency);
+        double avg_min_latency = total_min_latency / total_rx;
+        printf("║  OZET: %u/%u VLAN basarili | Min Latency Ortalama: %.2f us                              ║\n",
+               total_rx, total_tx, avg_min_latency);
     } else {
-        printf("║  OZET: %u/%u basarili | Hic paket alinamadi!                            ║\n",
+        printf("║  OZET: %u/%u basarili | Hic paket alinamadi!                                            ║\n",
                total_rx, total_tx);
     }
 
-    printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n");
+    printf("╚══════════════════════════════════════════════════════════════════════════════════════════╝\n");
     printf("\n");
 }
 
@@ -2368,37 +2292,6 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     reset_latency_test();
     g_latency_test.test_running = true;
     g_latency_test.test_start_time = rte_rdtsc();
-
-    // ==========================================
-    // Initialize hardware timestamp support
-    // ==========================================
-    printf("=== Initializing Hardware Timestamp Support ===\n");
-
-    // Register dynamic timestamp field (if not already registered)
-    if (hwts_dynfield_offset < 0) {
-        init_hwts_dynfield();
-    }
-
-    // Enable timesync on all ports (for hardware timestamps)
-    int hwts_ports = 0;
-    for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
-        if (ports_config->ports[i].is_valid) {
-            int ret = rte_eth_timesync_enable(ports_config->ports[i].port_id);
-            if (ret == 0) {
-                hwts_ports++;
-            }
-        }
-    }
-
-    if (hwts_ports > 0 && hwts_dynfield_offset >= 0) {
-        g_hwts_enabled = true;
-        printf("Hardware timestamp enabled on %d/%u ports\n", hwts_ports, ports_config->nb_ports);
-        printf("Using HARDWARE timestamps for latency measurement\n");
-    } else {
-        g_hwts_enabled = false;
-        printf("Hardware timestamp not available, using SOFTWARE timestamps\n");
-    }
-    printf("\n");
 
     // Pre-initialize test_count and vl_id values for all ports BEFORE starting workers
     // This fixes the race condition where RX workers check test_count before TX workers set it

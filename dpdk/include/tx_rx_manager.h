@@ -217,17 +217,22 @@ void init_rx_stats(void);
 
 #if LATENCY_TEST_ENABLED
 
-// Tek bir latency ölçüm sonucu
+// Tek bir latency ölçüm sonucu (çoklu örnek destekli)
 struct latency_result {
     uint16_t tx_port;           // Gönderen port
     uint16_t rx_port;           // Alan port
     uint16_t vlan_id;           // VLAN ID
     uint16_t vl_id;             // VL-ID
-    uint64_t tx_timestamp;      // TX zamanı (TSC cycles)
-    uint64_t rx_timestamp;      // RX zamanı (TSC cycles)
-    uint64_t latency_cycles;    // Gecikme (cycles)
-    double   latency_us;        // Gecikme (mikrosaniye)
-    bool     received;          // Paket alındı mı?
+    uint64_t tx_timestamp;      // Son TX zamanı (TSC cycles)
+    uint64_t rx_timestamp;      // Son RX zamanı (TSC cycles)
+    uint64_t latency_cycles;    // Son gecikme (cycles)
+    double   latency_us;        // Ortalama gecikme (mikrosaniye)
+    double   min_latency_us;    // Minimum gecikme
+    double   max_latency_us;    // Maximum gecikme
+    double   sum_latency_us;    // Toplam gecikme (ortalama hesabı için)
+    uint32_t tx_count;          // Gönderilen paket sayısı
+    uint32_t rx_count;          // Alınan paket sayısı
+    bool     received;          // En az 1 paket alındı mı?
     bool     prbs_ok;           // PRBS doğrulama başarılı mı?
 };
 

@@ -1976,17 +1976,14 @@ static uint16_t get_latency_paired_port(uint16_t port_id)
 }
 
 /**
- * Latency test TX worker - sends test packets one by one with individual timestamps
+ * Latency test TX worker - sends 1 packet per VLAN with timestamp
  */
 static int latency_tx_worker(void *arg)
 {
     struct tx_worker_params *params = (struct tx_worker_params *)arg;
     uint16_t port_id = params->port_id;
 
-    // Use all 4 TX queues for better throughput
-    const uint16_t num_tx_queues = NUM_TX_CORES;
-
-    printf("Latency TX Worker started: Port %u (using %u TX queues)\n", port_id, num_tx_queues);
+    printf("Latency TX Worker started: Port %u\n", port_id);
 
     // Get port VLAN config
     if (port_id >= MAX_PORTS_CONFIG) {
@@ -2003,83 +2000,54 @@ static int latency_tx_worker(void *arg)
         return 0;
     }
 
-    // Initialize port test state (already done in pre-init, but update anyway)
+    // Initialize port test state
     g_latency_test.ports[port_id].port_id = port_id;
     g_latency_test.ports[port_id].test_count = vlan_count;
 
-    // Parameters for statistical latency test: 100K packets per port = 25K per VLAN
-    #define PACKETS_PER_VLAN 25000
-    #define BURST_TX_SIZE 32
+    printf("  Port %u: Sending 1 packet per VLAN (%u VLANs)...\n", port_id, vlan_count);
 
-    printf("  Port %u: Sending %u packets per VLAN (%u total)...\n",
-           port_id, PACKETS_PER_VLAN, PACKETS_PER_VLAN * vlan_count);
-
-    // For each VLAN, send PACKETS_PER_VLAN packets using round-robin across TX queues
+    // Send 1 packet per VLAN using first VL-ID
     for (uint16_t v = 0; v < vlan_count; v++) {
         uint16_t vlan_id = vlan_cfg->tx_vlans[v];
-        uint16_t vl_id = vlan_cfg->tx_vl_ids[v];
+        uint16_t vl_id = vlan_cfg->tx_vl_ids[v];  // First VL-ID for this VLAN
 
         struct latency_result *result = &g_latency_test.ports[port_id].results[v];
         result->tx_count = 0;
 
-        uint32_t total_sent = 0;
-        uint16_t queue_idx = 0;  // Round-robin queue selector
-
-        while (total_sent < PACKETS_PER_VLAN) {
-            // Determine how many to send in this burst
-            uint32_t remaining = PACKETS_PER_VLAN - total_sent;
-            uint16_t to_send = (remaining > BURST_TX_SIZE) ? BURST_TX_SIZE : remaining;
-
-            // Allocate mbufs
-            struct rte_mbuf *mbufs[BURST_TX_SIZE];
-            uint16_t allocated = 0;
-
-            for (uint16_t i = 0; i < to_send; i++) {
-                mbufs[i] = rte_pktmbuf_alloc(params->mbuf_pool);
-                if (mbufs[i]) {
-                    allocated++;
-                } else {
-                    break;
-                }
-            }
-
-            if (allocated == 0) {
-                rte_delay_us(10);
-                continue;
-            }
-
-            // Get TX timestamp for this burst
-            uint64_t tx_timestamp = rte_rdtsc();
-
-            // Build packets
-            for (uint16_t i = 0; i < allocated; i++) {
-                build_latency_test_packet(mbufs[i], port_id, vlan_id, vl_id,
-                                          total_sent + i, tx_timestamp);
-            }
-
-            // Send burst using round-robin TX queue
-            uint16_t nb_tx = rte_eth_tx_burst(port_id, queue_idx, mbufs, allocated);
-
-            // Free unsent packets
-            for (uint16_t i = nb_tx; i < allocated; i++) {
-                rte_pktmbuf_free(mbufs[i]);
-            }
-
-            total_sent += nb_tx;
-            result->tx_count += nb_tx;
-            result->tx_timestamp = tx_timestamp;
-
-            // Round-robin to next TX queue
-            queue_idx = (queue_idx + 1) % num_tx_queues;
+        // Allocate single packet
+        struct rte_mbuf *mbuf = rte_pktmbuf_alloc(params->mbuf_pool);
+        if (!mbuf) {
+            printf("  Error: Failed to allocate mbuf for Port %u VLAN %u\n", port_id, vlan_id);
+            continue;
         }
 
-        printf("  TX: Port %u -> VLAN %u, VL-ID %u (%u packets)\n",
-               port_id, vlan_id, vl_id, result->tx_count);
+        // Get TX timestamp
+        uint64_t tx_timestamp = rte_rdtsc();
+
+        // Build packet
+        build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, 0, tx_timestamp);
+
+        // Send packet - try all TX queues until success
+        uint16_t nb_tx = 0;
+        for (uint16_t q = 0; q < NUM_TX_CORES && nb_tx == 0; q++) {
+            nb_tx = rte_eth_tx_burst(port_id, q, &mbuf, 1);
+        }
+
+        if (nb_tx == 0) {
+            rte_pktmbuf_free(mbuf);
+            printf("  TX FAILED: Port %u -> VLAN %u, VL-ID %u\n", port_id, vlan_id, vl_id);
+        } else {
+            result->tx_count = 1;
+            result->tx_timestamp = tx_timestamp;
+            printf("  TX: Port %u -> VLAN %u, VL-ID %u\n", port_id, vlan_id, vl_id);
+        }
+
+        // Small delay between packets
+        rte_delay_us(100);
     }
 
     g_latency_test.ports[port_id].tx_complete = true;
-    printf("Latency TX Worker completed: Port %u (%u total packets)\n",
-           port_id, PACKETS_PER_VLAN * vlan_count);
+    printf("Latency TX Worker completed: Port %u\n", port_id);
     return 0;
 }
 
@@ -2198,68 +2166,53 @@ static int latency_rx_worker(void *arg)
 }
 
 /**
- * Print latency test results - per-port average latency
+ * Print latency test results - per-VLAN single packet
  */
 void print_latency_results(void)
 {
     printf("\n");
-    printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                    LATENCY TEST SONUCLARI (Port Ortalamasi)                   ║\n");
-    printf("╠══════════╦══════════╦════════════╦════════════╦════════════════╦═════════════╣\n");
-    printf("║ TX Port  ║ RX Port  ║   TX Cnt   ║   RX Cnt   ║  Avg Latency   ║   Loss %%    ║\n");
-    printf("╠══════════╬══════════╬════════════╬════════════╬════════════════╬═════════════╣\n");
+    printf("╔═══════════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                    LATENCY TEST SONUCLARI (Tek Paket)                     ║\n");
+    printf("╠══════════╦══════════╦══════════╦══════════╦════════════════╦══════════════╣\n");
+    printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (us)  ║    Durum     ║\n");
+    printf("╠══════════╬══════════╬══════════╬══════════╬════════════════╬══════════════╣\n");
 
-    uint64_t global_tx_pkts = 0;
-    uint64_t global_rx_pkts = 0;
-    double global_latency_sum = 0.0;
-    uint32_t ports_with_data = 0;
+    uint32_t total_tx = 0;
+    uint32_t total_rx = 0;
+    double total_latency = 0.0;
 
     for (uint16_t p = 0; p < MAX_PORTS; p++) {
         struct port_latency_test *port_test = &g_latency_test.ports[p];
 
-        if (port_test->test_count == 0) continue;
-
-        // Aggregate per-port statistics
-        uint64_t port_tx = 0;
-        uint64_t port_rx = 0;
-        double port_latency_sum = 0.0;
-        uint16_t rx_port = 0;
-
         for (uint16_t t = 0; t < port_test->test_count; t++) {
             struct latency_result *result = &port_test->results[t];
-            port_tx += result->tx_count;
-            port_rx += result->rx_count;
-            port_latency_sum += result->sum_latency_us;
-            rx_port = result->rx_port;
-        }
 
-        global_tx_pkts += port_tx;
-        global_rx_pkts += port_rx;
-        global_latency_sum += port_latency_sum;
+            if (result->tx_count == 0) continue;
+            total_tx++;
 
-        if (port_rx > 0) {
-            ports_with_data++;
-            double port_avg_latency = port_latency_sum / port_rx;
-            double loss_pct = 100.0 * (port_tx - port_rx) / port_tx;
+            if (result->received && result->rx_count > 0) {
+                total_rx++;
+                double latency = result->sum_latency_us / result->rx_count;
+                total_latency += latency;
 
-            printf("║    %2u    ║    %2u    ║   %7lu  ║   %7lu  ║    %8.2f us  ║   %6.2f%%   ║\n",
-                   p, rx_port, port_tx, port_rx, port_avg_latency, loss_pct);
-        } else if (port_tx > 0) {
-            printf("║    %2u    ║    %2u    ║   %7lu  ║         0  ║        -       ║  100.00%%   ║\n",
-                   p, rx_port, port_tx);
+                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║    %10.2f  ║   BASARILI   ║\n",
+                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id, latency);
+            } else {
+                printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║        -       ║   TIMEOUT    ║\n",
+                       result->tx_port, result->rx_port, result->vlan_id, result->vl_id);
+            }
         }
     }
 
-    printf("╠══════════╩══════════╩════════════╩════════════╩════════════════╩═════════════╣\n");
+    printf("╠══════════╩══════════╩══════════╩══════════╩════════════════╩══════════════╣\n");
 
-    if (global_rx_pkts > 0) {
-        double global_avg_latency = global_latency_sum / global_rx_pkts;
-        double global_loss_pct = 100.0 * (global_tx_pkts - global_rx_pkts) / global_tx_pkts;
-        printf("║  TOPLAM: TX %lu, RX %lu pkts | Loss: %.2f%% | Avg: %.2f us               ║\n",
-               global_tx_pkts, global_rx_pkts, global_loss_pct, global_avg_latency);
+    if (total_rx > 0) {
+        double avg_latency = total_latency / total_rx;
+        printf("║  OZET: %u/%u basarili | Ortalama: %.2f us                               ║\n",
+               total_rx, total_tx, avg_latency);
     } else {
-        printf("║  TOPLAM: TX %lu pkts | Hic paket alinamadi!                              ║\n",
-               global_tx_pkts);
+        printf("║  OZET: %u/%u basarili | Hic paket alinamadi!                            ║\n",
+               total_rx, total_tx);
     }
 
     printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n");

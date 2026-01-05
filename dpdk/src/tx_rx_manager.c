@@ -2071,8 +2071,8 @@ static int latency_tx_worker(void *arg)
             printf("  TX: Port %u -> VLAN %u, VL-ID %u\n", port_id, vlan_id, vl_id);
         }
 
-        // Small delay between packets
-        rte_delay_us(100);
+        // 32 microsecond delay between VLAN packets
+        rte_delay_us(32);
     }
 
     g_latency_test.ports[port_id].tx_complete = true;

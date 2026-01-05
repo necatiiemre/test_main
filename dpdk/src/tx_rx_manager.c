@@ -2020,44 +2020,57 @@ static int latency_tx_worker(void *arg)
     }
     rte_delay_us(500);  // Wait for warm-up to complete
 
-    // Send one packet per VLAN with individual timestamps
+    // Send multiple copies of each packet per VLAN to overcome TX coalescence
+    #define COPIES_PER_PACKET 16
+
     for (uint16_t v = 0; v < vlan_count; v++) {
         uint16_t vlan_id = vlan_cfg->tx_vlans[v];
         uint16_t vl_id = vlan_cfg->tx_vl_ids[v];
 
-        // Allocate mbuf
-        struct rte_mbuf *mbuf = rte_pktmbuf_alloc(params->mbuf_pool);
-        if (!mbuf) {
-            printf("Error: Failed to allocate mbuf for port %u VLAN %u\n", port_id, vlan_id);
+        // Allocate mbufs for burst
+        struct rte_mbuf *mbufs[COPIES_PER_PACKET];
+        int allocated = 0;
+
+        for (int c = 0; c < COPIES_PER_PACKET; c++) {
+            mbufs[c] = rte_pktmbuf_alloc(params->mbuf_pool);
+            if (mbufs[c]) {
+                allocated++;
+            }
+        }
+
+        if (allocated == 0) {
+            printf("Error: Failed to allocate mbufs for port %u VLAN %u\n", port_id, vlan_id);
             continue;
         }
 
         // Get TX timestamp just before building and sending
         uint64_t tx_timestamp = rte_rdtsc();
 
-        // Build packet with current timestamp
-        build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, v, tx_timestamp);
+        // Build all copies with same timestamp
+        for (int c = 0; c < allocated; c++) {
+            build_latency_test_packet(mbufs[c], port_id, vlan_id, vl_id, v, tx_timestamp);
+        }
 
         // Update result with TX timestamp
         struct latency_result *result = &g_latency_test.ports[port_id].results[v];
         result->tx_timestamp = tx_timestamp;
 
-        // Send packet immediately
-        uint16_t nb_tx = rte_eth_tx_burst(port_id, params->queue_id, &mbuf, 1);
-        if (nb_tx == 0) {
-            printf("Error: Failed to send packet on port %u VLAN %u\n", port_id, vlan_id);
-            rte_pktmbuf_free(mbuf);
-        } else {
-            sent_count++;
-            printf("  TX: Port %u -> VLAN %u, VL-ID %u, Seq %u\n",
-                   port_id, vlan_id, vl_id, v);
+        // Send all copies in burst
+        uint16_t nb_tx = rte_eth_tx_burst(port_id, params->queue_id, mbufs, allocated);
+
+        // Free unsent packets
+        for (int c = nb_tx; c < allocated; c++) {
+            rte_pktmbuf_free(mbufs[c]);
         }
 
-        // Force TX descriptor cleanup to flush the packet
-        rte_eth_tx_done_cleanup(port_id, params->queue_id, 0);
+        if (nb_tx > 0) {
+            sent_count++;
+            printf("  TX: Port %u -> VLAN %u, VL-ID %u, Seq %u (%u copies)\n",
+                   port_id, vlan_id, vl_id, v, nb_tx);
+        }
 
-        // Longer delay to ensure packet is transmitted and received
-        rte_delay_us(1000);  // 1ms between packets
+        // Small delay between VLANs
+        rte_delay_us(500);
     }
 
     g_latency_test.ports[port_id].tx_complete = true;

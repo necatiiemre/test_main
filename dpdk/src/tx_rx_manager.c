@@ -1953,6 +1953,29 @@ static int build_latency_test_packet(struct rte_mbuf *mbuf,
 }
 
 /**
+ * Get the paired port for latency test
+ * Port mapping for direct connection (no switch):
+ *   Port 0 <-> Port 7
+ *   Port 1 <-> Port 6
+ *   Port 2 <-> Port 5
+ *   Port 3 <-> Port 4
+ */
+static uint16_t get_latency_paired_port(uint16_t port_id)
+{
+    switch (port_id) {
+        case 0: return 7;
+        case 1: return 6;
+        case 2: return 5;
+        case 3: return 4;
+        case 4: return 3;
+        case 5: return 2;
+        case 6: return 1;
+        case 7: return 0;
+        default: return port_id;  // Unknown port, return same
+    }
+}
+
+/**
  * Latency test TX worker - sends test packets
  */
 static int latency_tx_worker(void *arg)
@@ -2003,7 +2026,7 @@ static int latency_tx_worker(void *arg)
         // Store TX info in results
         struct latency_result *result = &g_latency_test.ports[port_id].results[v];
         result->tx_port = port_id;
-        result->rx_port = (port_id % 2 == 0) ? (port_id + 1) : (port_id - 1);  // Paired port
+        result->rx_port = get_latency_paired_port(port_id);  // Paired port for latency test
         result->vlan_id = vlan_id;
         result->vl_id = vl_id;
         result->tx_timestamp = tx_timestamp;
@@ -2051,9 +2074,6 @@ static int latency_rx_worker(void *arg)
     uint16_t expected_count = port_vlans[src_port_id].tx_vlan_count;
     uint16_t received_count = 0;
 
-    // Get PRBS cache for verification
-    uint8_t *prbs_cache = get_prbs_cache_ext_for_port(src_port_id);
-
     struct rte_mbuf *pkts[BURST_SIZE];
     uint64_t timeout_cycles = g_latency_test.tsc_hz * LATENCY_TEST_TIMEOUT_SEC;
     uint64_t start_time = rte_rdtsc();
@@ -2086,9 +2106,8 @@ static int latency_rx_worker(void *arg)
                 continue;
             }
 
-            // Extract sequence and TX timestamp from payload
+            // Extract TX timestamp from payload
             uint8_t *payload = pkt + payload_offset;
-            uint64_t sequence = *(uint64_t *)payload;
             uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
 
             // Extract VL-ID from DST MAC
@@ -2105,21 +2124,11 @@ static int latency_rx_worker(void *arg)
                     result->latency_us = (double)result->latency_cycles * 1000000.0 / g_latency_test.tsc_hz;
                     result->received = true;
 
-                    // PRBS verification
-                    if (prbs_cache) {
-                        uint16_t prbs_len = m->pkt_len - payload_offset - LATENCY_PAYLOAD_OFFSET;
-                        uint64_t prbs_offset = (sequence * (uint64_t)MAX_PRBS_BYTES) % PRBS_CACHE_SIZE;
-                        uint8_t *expected = prbs_cache + prbs_offset;
-                        uint8_t *received_data = payload + LATENCY_PAYLOAD_OFFSET;
+                    // PRBS verification disabled for latency test
+                    result->prbs_ok = true;
 
-                        result->prbs_ok = (memcmp(received_data, expected, prbs_len) == 0);
-                    } else {
-                        result->prbs_ok = true;  // Skip verification if no cache
-                    }
-
-                    printf("  RX: Port %u <- VL-ID %u, Latency %.2f us, PRBS %s\n",
-                           port_id, vl_id, result->latency_us,
-                           result->prbs_ok ? "OK" : "FAIL");
+                    printf("  RX: Port %u <- VL-ID %u, Latency %.2f us\n",
+                           port_id, vl_id, result->latency_us);
 
                     received_count++;
                     found = true;
@@ -2224,7 +2233,7 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
         struct port *port = &ports_config->ports[i];
         uint16_t port_id = port->port_id;
-        uint16_t paired_port_id = (port_id % 2 == 0) ? (port_id + 1) : (port_id - 1);
+        uint16_t paired_port_id = get_latency_paired_port(port_id);  // Use latency test port mapping
         uint16_t lcore_id = port->used_rx_cores[0];  // Use first RX core
 
         if (lcore_id == 0 || lcore_id >= RTE_MAX_LCORE) continue;

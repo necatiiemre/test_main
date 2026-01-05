@@ -2086,7 +2086,11 @@ static int latency_rx_worker(void *arg)
     uint16_t port_id = params->port_id;
     uint16_t src_port_id = params->src_port_id;
 
-    printf("Latency RX Worker started: Port %u (expecting from Port %u)\n", port_id, src_port_id);
+    // Poll ALL RX queues to handle RSS distribution
+    const uint16_t num_rx_queues = NUM_RX_CORES;
+
+    printf("Latency RX Worker started: Port %u (expecting from Port %u, polling %u queues)\n",
+           port_id, src_port_id, num_rx_queues);
 
 #if VLAN_ENABLED
     const uint16_t l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
@@ -2096,6 +2100,7 @@ static int latency_rx_worker(void *arg)
     const uint32_t payload_offset = l2_len + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
     uint32_t total_received = 0;
+    uint32_t per_queue_received[NUM_RX_CORES] = {0};
 
     struct rte_mbuf *pkts[BURST_SIZE];
     uint64_t timeout_cycles = g_latency_test.tsc_hz * LATENCY_TEST_TIMEOUT_SEC;
@@ -2109,61 +2114,64 @@ static int latency_rx_worker(void *arg)
             break;
         }
 
-        // Receive packets
-        uint16_t nb_rx = rte_eth_rx_burst(port_id, params->queue_id, pkts, BURST_SIZE);
-        if (nb_rx == 0) {
-            continue;
-        }
-
-        uint64_t rx_timestamp = rte_rdtsc();
-
-        for (uint16_t i = 0; i < nb_rx; i++) {
-            struct rte_mbuf *m = pkts[i];
-            uint8_t *pkt = rte_pktmbuf_mtod(m, uint8_t *);
-
-            // Check minimum length
-            if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
-                rte_pktmbuf_free(m);
+        // Poll ALL RX queues in round-robin to handle RSS
+        for (uint16_t q = 0; q < num_rx_queues; q++) {
+            uint16_t nb_rx = rte_eth_rx_burst(port_id, q, pkts, BURST_SIZE);
+            if (nb_rx == 0) {
                 continue;
             }
 
-            // Extract TX timestamp from payload
-            uint8_t *payload = pkt + payload_offset;
-            uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
+            uint64_t rx_timestamp = rte_rdtsc();
 
-            // Extract VL-ID from DST MAC (bytes 4-5)
-            uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+            for (uint16_t i = 0; i < nb_rx; i++) {
+                struct rte_mbuf *m = pkts[i];
+                uint8_t *pkt = rte_pktmbuf_mtod(m, uint8_t *);
 
-            // Calculate latency
-            double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
-
-            // Find matching result in source port's results and accumulate stats
-            for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
-                struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
-
-                if (result->vl_id == vl_id) {
-                    // Accumulate statistics
-                    result->rx_count++;
-                    result->sum_latency_us += latency_us;
-
-                    if (!result->received || latency_us < result->min_latency_us) {
-                        result->min_latency_us = latency_us;
-                    }
-                    if (!result->received || latency_us > result->max_latency_us) {
-                        result->max_latency_us = latency_us;
-                    }
-
-                    result->received = true;
-                    result->prbs_ok = true;
-                    result->rx_timestamp = rx_timestamp;
-                    result->latency_cycles = rx_timestamp - tx_timestamp;
-
-                    total_received++;
-                    break;
+                // Check minimum length
+                if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
+                    rte_pktmbuf_free(m);
+                    continue;
                 }
-            }
 
-            rte_pktmbuf_free(m);
+                // Extract TX timestamp from payload
+                uint8_t *payload = pkt + payload_offset;
+                uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
+
+                // Extract VL-ID from DST MAC (bytes 4-5)
+                uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+
+                // Calculate latency
+                double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+
+                // Find matching result in source port's results and accumulate stats
+                for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
+                    struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
+
+                    if (result->vl_id == vl_id) {
+                        // Accumulate statistics
+                        result->rx_count++;
+                        result->sum_latency_us += latency_us;
+
+                        if (!result->received || latency_us < result->min_latency_us) {
+                            result->min_latency_us = latency_us;
+                        }
+                        if (!result->received || latency_us > result->max_latency_us) {
+                            result->max_latency_us = latency_us;
+                        }
+
+                        result->received = true;
+                        result->prbs_ok = true;
+                        result->rx_timestamp = rx_timestamp;
+                        result->latency_cycles = rx_timestamp - tx_timestamp;
+
+                        total_received++;
+                        per_queue_received[q]++;
+                        break;
+                    }
+                }
+
+                rte_pktmbuf_free(m);
+            }
         }
     }
 
@@ -2176,8 +2184,10 @@ static int latency_rx_worker(void *arg)
     }
 
     g_latency_test.ports[port_id].rx_complete = true;
-    printf("Latency RX Worker completed: Port %u (%u packets received)\n",
-           port_id, total_received);
+    printf("Latency RX Worker completed: Port %u (%u packets total, Q0:%u Q1:%u Q2:%u Q3:%u)\n",
+           port_id, total_received,
+           per_queue_received[0], per_queue_received[1],
+           per_queue_received[2], per_queue_received[3]);
     return 0;
 }
 

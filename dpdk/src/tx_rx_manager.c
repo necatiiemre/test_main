@@ -2006,6 +2006,20 @@ static int latency_tx_worker(void *arg)
 
     uint16_t sent_count = 0;
 
+    // Warm-up: Send dummy packets to prime the TX path
+    for (int warm = 0; warm < 8; warm++) {
+        struct rte_mbuf *dummy = rte_pktmbuf_alloc(params->mbuf_pool);
+        if (dummy) {
+            uint8_t *pkt = rte_pktmbuf_mtod(dummy, uint8_t *);
+            memset(pkt, 0, 64);
+            dummy->data_len = 64;
+            dummy->pkt_len = 64;
+            rte_eth_tx_burst(port_id, params->queue_id, &dummy, 1);
+            rte_delay_us(50);
+        }
+    }
+    rte_delay_us(500);  // Wait for warm-up to complete
+
     // Send one packet per VLAN with individual timestamps
     for (uint16_t v = 0; v < vlan_count; v++) {
         uint16_t vlan_id = vlan_cfg->tx_vlans[v];

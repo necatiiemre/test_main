@@ -2064,11 +2064,8 @@ static int latency_tx_worker(void *arg)
             // Build packet with sequence number = p
             build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, tx_timestamp);
 
-            // Send packet - try all TX queues until success
-            uint16_t nb_tx = 0;
-            for (uint16_t q = 0; q < NUM_TX_CORES && nb_tx == 0; q++) {
-                nb_tx = rte_eth_tx_burst(port_id, q, &mbuf, 1);
-            }
+            // Send packet using ONLY queue 0 for latency test (eliminates multi-queue effects)
+            uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
 
             if (nb_tx == 0) {
                 rte_pktmbuf_free(mbuf);
@@ -2094,8 +2091,8 @@ static int latency_tx_worker(void *arg)
 }
 
 /**
- * Latency test RX worker - FAST POLLING mode for accurate latency measurement
- * Uses round-robin queue order to eliminate queue bias
+ * Latency test RX worker - SINGLE QUEUE mode for accurate latency measurement
+ * Uses only queue 0 to eliminate multi-queue effects
  */
 static int latency_rx_worker(void *arg)
 {
@@ -2103,11 +2100,7 @@ static int latency_rx_worker(void *arg)
     uint16_t port_id = params->port_id;
     uint16_t src_port_id = params->src_port_id;
 
-    // Poll ALL RX queues to handle RSS distribution
-    const uint16_t num_rx_queues = NUM_RX_CORES;
-
-    printf("Latency RX Worker started: Port %u (FAST POLLING mode, %u queues)\n",
-           port_id, num_rx_queues);
+    printf("Latency RX Worker started: Port %u (SINGLE QUEUE mode, queue 0 only)\n", port_id);
 
 #if VLAN_ENABLED
     const uint16_t l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
@@ -2117,17 +2110,14 @@ static int latency_rx_worker(void *arg)
     const uint32_t payload_offset = l2_len + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
     uint32_t total_received = 0;
-    uint32_t per_queue_received[NUM_RX_CORES] = {0};
 
     struct rte_mbuf *pkts[BURST_SIZE];
     uint64_t timeout_cycles = g_latency_test.tsc_hz * LATENCY_TEST_TIMEOUT_SEC;
     uint64_t start_time = rte_rdtsc();
 
-    // Round-robin queue start - eliminates queue order bias
-    uint16_t start_queue = 0;
     uint32_t loop_count = 0;
 
-    // FAST POLLING LOOP - check timeout every 1000 iterations to reduce overhead
+    // FAST POLLING LOOP - use ONLY queue 0 for latency test
     while (1) {
         // Check timeout every 1000 loops (reduces rdtsc overhead)
         if (++loop_count >= 1000) {
@@ -2137,70 +2127,62 @@ static int latency_rx_worker(void *arg)
             }
         }
 
-        // Poll queues with round-robin start to eliminate queue bias
-        for (uint16_t i = 0; i < num_rx_queues; i++) {
-            uint16_t q = (start_queue + i) % num_rx_queues;
+        // Poll ONLY queue 0 for latency test
+        uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, pkts, BURST_SIZE);
+        if (nb_rx == 0) {
+            continue;
+        }
 
-            uint16_t nb_rx = rte_eth_rx_burst(port_id, q, pkts, BURST_SIZE);
-            if (nb_rx == 0) {
+        for (uint16_t j = 0; j < nb_rx; j++) {
+            struct rte_mbuf *m = pkts[j];
+            uint8_t *pkt = rte_pktmbuf_mtod(m, uint8_t *);
+
+            // Quick length check
+            if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
+                rte_pktmbuf_free(m);
                 continue;
             }
 
-            for (uint16_t j = 0; j < nb_rx; j++) {
-                struct rte_mbuf *m = pkts[j];
-                uint8_t *pkt = rte_pktmbuf_mtod(m, uint8_t *);
+            // Get RX timestamp immediately
+            uint64_t rx_timestamp = rte_rdtsc();
 
-                // Quick length check
-                if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
-                    rte_pktmbuf_free(m);
-                    continue;
-                }
+            // Extract TX timestamp from payload
+            uint8_t *payload = pkt + payload_offset;
+            uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
 
-                // Get RX timestamp immediately
-                uint64_t rx_timestamp = rte_rdtsc();
+            // Extract VL-ID from DST MAC (bytes 4-5)
+            uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
 
-                // Extract TX timestamp from payload
-                uint8_t *payload = pkt + payload_offset;
-                uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
+            // Calculate latency using TSC cycles
+            double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
 
-                // Extract VL-ID from DST MAC (bytes 4-5)
-                uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+            // Find matching result in source port's results
+            for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
+                struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
 
-                // Calculate latency using TSC cycles
-                double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+                if (result->vl_id == vl_id) {
+                    result->rx_count++;
+                    result->sum_latency_us += latency_us;
 
-                // Find matching result in source port's results
-                for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
-                    struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
-
-                    if (result->vl_id == vl_id) {
-                        result->rx_count++;
-                        result->sum_latency_us += latency_us;
-
-                        if (!result->received || latency_us < result->min_latency_us) {
-                            result->min_latency_us = latency_us;
-                        }
-                        if (!result->received || latency_us > result->max_latency_us) {
-                            result->max_latency_us = latency_us;
-                        }
-
-                        result->received = true;
-                        result->prbs_ok = true;
-                        result->rx_timestamp = rx_timestamp;
-                        result->latency_cycles = rx_timestamp - tx_timestamp;
-
-                        total_received++;
-                        per_queue_received[q]++;
-                        break;
+                    if (!result->received || latency_us < result->min_latency_us) {
+                        result->min_latency_us = latency_us;
                     }
+                    if (!result->received || latency_us > result->max_latency_us) {
+                        result->max_latency_us = latency_us;
+                    }
+
+                    result->received = true;
+                    result->prbs_ok = true;
+                    result->rx_timestamp = rx_timestamp;
+                    result->latency_cycles = rx_timestamp - tx_timestamp;
+
+                    total_received++;
+                    break;
                 }
-
-                rte_pktmbuf_free(m);
             }
-        }
 
-        // Rotate start queue for next round (eliminates queue bias)
-        start_queue = (start_queue + 1) % num_rx_queues;
+            rte_pktmbuf_free(m);
+        }
     }
 
     // Calculate averages
@@ -2212,10 +2194,7 @@ static int latency_rx_worker(void *arg)
     }
 
     g_latency_test.ports[port_id].rx_complete = true;
-    printf("Latency RX Worker completed: Port %u (%u packets total, Q0:%u Q1:%u Q2:%u Q3:%u)\n",
-           port_id, total_received,
-           per_queue_received[0], per_queue_received[1],
-           per_queue_received[2], per_queue_received[3]);
+    printf("Latency RX Worker completed: Port %u (%u packets received)\n", port_id, total_received);
     return 0;
 }
 

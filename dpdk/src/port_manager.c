@@ -183,11 +183,27 @@ void print_ports_by_card(const struct ports_config *config)
 int configure_port(uint16_t port_id)
 {
     struct rte_eth_conf port_conf = {0};
+    struct rte_eth_dev_info dev_info;
     int ret;
+
+    // Get device info to check capabilities
+    ret = rte_eth_dev_info_get(port_id, &dev_info);
+    if (ret < 0) {
+        printf("Error: Cannot get device info for port %u\n", port_id);
+        return ret;
+    }
 
     // Basic port configuration
     port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
     port_conf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
+
+    // Enable hardware RX timestamp if supported (for latency measurement)
+    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+        printf("Port %u: Hardware RX timestamp enabled\n", port_id);
+    } else {
+        printf("Port %u: Hardware RX timestamp NOT supported\n", port_id);
+    }
 
     // Configure the port
     ret = rte_eth_dev_configure(port_id, 1, 1, &port_conf);

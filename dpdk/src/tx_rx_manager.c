@@ -2290,8 +2290,8 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
         }
     }
 
-    // Wait a bit for RX workers to be ready
-    rte_delay_ms(100);
+    // Wait for RX workers to be ready (increased delay for stability)
+    rte_delay_ms(500);
 
     // Start TX workers
     printf("\n=== Starting Latency TX Workers ===\n");

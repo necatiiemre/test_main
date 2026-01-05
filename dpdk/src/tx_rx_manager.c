@@ -2042,8 +2042,8 @@ static int latency_tx_worker(void *arg)
         // Force TX descriptor cleanup to flush the packet
         rte_eth_tx_done_cleanup(port_id, params->queue_id, 0);
 
-        // Small delay to allow packet to be transmitted
-        rte_delay_us(50);
+        // Longer delay to ensure packet is transmitted and received
+        rte_delay_us(1000);  // 1ms between packets
     }
 
     g_latency_test.ports[port_id].tx_complete = true;

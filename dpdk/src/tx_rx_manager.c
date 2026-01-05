@@ -2111,12 +2111,9 @@ static int latency_rx_worker(void *arg)
 
     // Continue receiving until timeout
     while (1) {
-        // Take RX timestamp ONCE at the start of each polling round
-        // This eliminates queue-order bias in latency measurement
-        uint64_t rx_timestamp = rte_rdtsc();
-
         // Check timeout
-        if ((rx_timestamp - start_time) > timeout_cycles) {
+        uint64_t now = rte_rdtsc();
+        if ((now - start_time) > timeout_cycles) {
             break;
         }
 
@@ -2126,6 +2123,9 @@ static int latency_rx_worker(void *arg)
             if (nb_rx == 0) {
                 continue;
             }
+
+            // Take RX timestamp immediately after finding packets in this queue
+            uint64_t rx_timestamp = rte_rdtsc();
 
             for (uint16_t i = 0; i < nb_rx; i++) {
                 struct rte_mbuf *m = pkts[i];

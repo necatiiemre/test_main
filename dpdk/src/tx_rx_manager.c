@@ -2272,6 +2272,49 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     g_latency_test.test_running = true;
     g_latency_test.test_start_time = rte_rdtsc();
 
+    // ==========================================
+    // Configure RSS to send ALL packets to queue 0
+    // This ensures all VLANs are received on queue 0
+    // ==========================================
+    printf("=== Configuring RSS RETA for Queue 0 ===\n");
+    for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+        if (!ports_config->ports[i].is_valid) continue;
+        uint16_t port_id = ports_config->ports[i].port_id;
+
+        struct rte_eth_dev_info dev_info;
+        int ret = rte_eth_dev_info_get(port_id, &dev_info);
+        if (ret != 0) {
+            printf("  Port %u: Cannot get dev info\n", port_id);
+            continue;
+        }
+
+        uint16_t reta_size = dev_info.reta_size;
+        if (reta_size == 0) {
+            printf("  Port %u: RSS RETA not supported\n", port_id);
+            continue;
+        }
+
+        // Allocate RETA config
+        uint16_t num_entries = (reta_size + RTE_ETH_RETA_GROUP_SIZE - 1) / RTE_ETH_RETA_GROUP_SIZE;
+        struct rte_eth_rss_reta_entry64 reta_conf[num_entries];
+
+        // Set all RETA entries to queue 0
+        for (uint16_t j = 0; j < num_entries; j++) {
+            reta_conf[j].mask = UINT64_MAX;
+            for (uint16_t k = 0; k < RTE_ETH_RETA_GROUP_SIZE; k++) {
+                reta_conf[j].reta[k] = 0;  // All to queue 0
+            }
+        }
+
+        ret = rte_eth_dev_rss_reta_update(port_id, reta_conf, reta_size);
+        if (ret == 0) {
+            printf("  Port %u: RSS RETA updated - all %u entries to queue 0\n", port_id, reta_size);
+        } else {
+            printf("  Port %u: RSS RETA update failed (%d)\n", port_id, ret);
+        }
+    }
+    printf("\n");
+
     // Pre-initialize test_count and vl_id values for all ports BEFORE starting workers
     // This fixes the race condition where RX workers check test_count before TX workers set it
     printf("=== Pre-initializing Latency Test Data ===\n");
@@ -2394,6 +2437,40 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
 
     g_latency_test.test_running = false;
     g_latency_test.test_complete = true;
+
+    // ==========================================
+    // Restore RSS RETA to distribute across all queues
+    // ==========================================
+    printf("\n=== Restoring RSS RETA for Normal Operation ===\n");
+    for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+        if (!ports_config->ports[i].is_valid) continue;
+        uint16_t port_id = ports_config->ports[i].port_id;
+
+        struct rte_eth_dev_info dev_info;
+        int ret = rte_eth_dev_info_get(port_id, &dev_info);
+        if (ret != 0) continue;
+
+        uint16_t reta_size = dev_info.reta_size;
+        if (reta_size == 0) continue;
+
+        uint16_t num_entries = (reta_size + RTE_ETH_RETA_GROUP_SIZE - 1) / RTE_ETH_RETA_GROUP_SIZE;
+        struct rte_eth_rss_reta_entry64 reta_conf[num_entries];
+
+        // Distribute across all RX queues (round-robin)
+        for (uint16_t j = 0; j < num_entries; j++) {
+            reta_conf[j].mask = UINT64_MAX;
+            for (uint16_t k = 0; k < RTE_ETH_RETA_GROUP_SIZE; k++) {
+                uint16_t idx = j * RTE_ETH_RETA_GROUP_SIZE + k;
+                reta_conf[j].reta[k] = idx % NUM_RX_CORES;  // Distribute to all RX queues
+            }
+        }
+
+        ret = rte_eth_dev_rss_reta_update(port_id, reta_conf, reta_size);
+        if (ret == 0) {
+            printf("  Port %u: RSS RETA restored - distributed to %u queues\n", port_id, NUM_RX_CORES);
+        }
+    }
+    printf("\n");
 
     // Print results
     print_latency_results();

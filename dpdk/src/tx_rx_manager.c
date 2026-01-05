@@ -2111,20 +2111,21 @@ static int latency_rx_worker(void *arg)
 
     // Continue receiving until timeout
     while (1) {
+        // Take RX timestamp ONCE at the start of each polling round
+        // This eliminates queue-order bias in latency measurement
+        uint64_t rx_timestamp = rte_rdtsc();
+
         // Check timeout
-        uint64_t now = rte_rdtsc();
-        if ((now - start_time) > timeout_cycles) {
+        if ((rx_timestamp - start_time) > timeout_cycles) {
             break;
         }
 
-        // Poll ALL RX queues in round-robin to handle RSS
+        // Poll ALL RX queues to handle RSS
         for (uint16_t q = 0; q < num_rx_queues; q++) {
             uint16_t nb_rx = rte_eth_rx_burst(port_id, q, pkts, BURST_SIZE);
             if (nb_rx == 0) {
                 continue;
             }
-
-            uint64_t rx_timestamp = rte_rdtsc();
 
             for (uint16_t i = 0; i < nb_rx; i++) {
                 struct rte_mbuf *m = pkts[i];

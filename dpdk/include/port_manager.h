@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include "port.h"
+#include "config.h"  // For LATENCY_TEST_ENABLED
 
 /**
  * Initialize and discover all available DPDK ports
@@ -51,5 +52,18 @@ void portNumaNodesMatch(struct ports_config *config);
  * Assign lcores to port TX/RX queues based on NUMA affinity
  */
 void lcorePortAssign(struct ports_config *config);
+
+#if LATENCY_TEST_ENABLED
+/**
+ * Enable hardware timesync on a port (for hardware timestamps)
+ * Must be called after port is started
+ */
+int enable_port_timesync(uint16_t port_id);
+
+/**
+ * Enable timesync on all ports
+ */
+int enable_all_ports_timesync(struct ports_config *config);
+#endif /* LATENCY_TEST_ENABLED */
 
 #endif /* PORT_MANAGER_H */

@@ -6,8 +6,57 @@
 #include <rte_cycles.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
+#include <rte_mbuf_dyn.h>     // For hardware timestamp dynamic field
 #include <stdlib.h>
 #include <string.h>
+
+// ==========================================
+// HARDWARE TIMESTAMP SUPPORT (DPDK 24.11.1)
+// ==========================================
+#if LATENCY_TEST_ENABLED
+
+// Dynamic field offset for hardware RX timestamp
+static int hwts_dynfield_offset = -1;
+
+// Dynamic field descriptor for timestamp
+static const struct rte_mbuf_dynfield hwts_dynfield_desc = {
+    .name = "rte_dynfield_timestamp",
+    .size = sizeof(uint64_t),
+    .align = __alignof__(uint64_t),
+};
+
+// Flag to track if hardware timestamp is available
+static volatile bool g_hwts_enabled = false;
+
+/**
+ * Initialize hardware timestamp dynamic field
+ * Must be called before port configuration
+ */
+static int init_hwts_dynfield(void)
+{
+    hwts_dynfield_offset = rte_mbuf_dynfield_register(&hwts_dynfield_desc);
+    if (hwts_dynfield_offset < 0) {
+        printf("Warning: Could not register timestamp dynamic field: %s\n",
+               rte_strerror(rte_errno));
+        printf("         Will use software TSC timestamps instead\n");
+        return -1;
+    }
+    printf("Hardware timestamp dynamic field registered at offset %d\n", hwts_dynfield_offset);
+    return 0;
+}
+
+/**
+ * Get hardware timestamp from mbuf
+ * Returns 0 if hardware timestamp not available
+ */
+static inline uint64_t get_hwts_from_mbuf(struct rte_mbuf *mbuf)
+{
+    if (hwts_dynfield_offset < 0)
+        return 0;
+    return *RTE_MBUF_DYNFIELD(mbuf, hwts_dynfield_offset, uint64_t *);
+}
+
+#endif /* LATENCY_TEST_ENABLED */
 
 // ==========================================
 // GLOBAL VARIABLES
@@ -2050,8 +2099,18 @@ static int latency_tx_worker(void *arg)
             continue;
         }
 
-        // Get TX timestamp using TSC
-        uint64_t tx_timestamp = rte_rdtsc();
+        // Get TX timestamp - use hardware clock if timesync is enabled
+        uint64_t tx_timestamp;
+        if (g_hwts_enabled) {
+            // Read NIC hardware clock for consistent timestamp domain with RX
+            int ret = rte_eth_read_clock(port_id, &tx_timestamp);
+            if (ret != 0) {
+                // Fallback to software timestamp
+                tx_timestamp = rte_rdtsc();
+            }
+        } else {
+            tx_timestamp = rte_rdtsc();
+        }
 
         // Build packet
         build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, 0, tx_timestamp);
@@ -2083,6 +2142,7 @@ static int latency_tx_worker(void *arg)
 /**
  * Latency test RX worker - FAST POLLING mode for accurate latency measurement
  * Uses round-robin queue order to eliminate queue bias
+ * Supports hardware timestamps when available (mlx5 driver)
  */
 static int latency_rx_worker(void *arg)
 {
@@ -2093,8 +2153,11 @@ static int latency_rx_worker(void *arg)
     // Poll ALL RX queues to handle RSS distribution
     const uint16_t num_rx_queues = NUM_RX_CORES;
 
-    printf("Latency RX Worker started: Port %u (FAST POLLING mode, %u queues)\n",
-           port_id, num_rx_queues);
+    // Check if hardware timestamp is available
+    const bool use_hwts = (hwts_dynfield_offset >= 0) && g_hwts_enabled;
+
+    printf("Latency RX Worker started: Port %u (FAST POLLING mode, %u queues, %s timestamps)\n",
+           port_id, num_rx_queues, use_hwts ? "HARDWARE" : "SOFTWARE");
 
 #if VLAN_ENABLED
     const uint16_t l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
@@ -2143,8 +2206,22 @@ static int latency_rx_worker(void *arg)
                     continue;
                 }
 
-                // Get RX timestamp immediately after receiving packet
-                uint64_t rx_timestamp = rte_rdtsc();
+                // Get RX timestamp - use hardware timestamp if available
+                uint64_t rx_timestamp;
+                bool hwts_used = false;
+
+                if (use_hwts) {
+                    uint64_t hwts = get_hwts_from_mbuf(m);
+                    if (hwts != 0) {
+                        rx_timestamp = hwts;
+                        hwts_used = true;
+                    } else {
+                        // Fallback to software timestamp if hardware timestamp is 0
+                        rx_timestamp = rte_rdtsc();
+                    }
+                } else {
+                    rx_timestamp = rte_rdtsc();
+                }
 
                 // Extract TX timestamp from payload
                 uint8_t *payload = pkt + payload_offset;
@@ -2153,8 +2230,20 @@ static int latency_rx_worker(void *arg)
                 // Extract VL-ID from DST MAC (bytes 4-5)
                 uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
 
-                // Calculate latency using TSC cycles
-                double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+                // Calculate latency
+                // Note: When hardware timestamps are used, both TX (from rte_eth_read_clock)
+                //       and RX (from mbuf dynamic field) are in NIC clock cycles
+                //       mlx5 NIC clock is typically 1 GHz (1 cycle = 1 nanosecond)
+                double latency_us;
+                if (hwts_used) {
+                    // Hardware timestamp: NIC clock cycles (typically 1 GHz = 1ns per cycle)
+                    // Convert nanoseconds to microseconds
+                    int64_t latency_cycles = (int64_t)(rx_timestamp - tx_timestamp);
+                    latency_us = (double)latency_cycles / 1000.0;  // ns to us
+                } else {
+                    // Software timestamp: use TSC frequency
+                    latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+                }
 
                 // Find matching result in source port's results
                 for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
@@ -2214,6 +2303,8 @@ void print_latency_results(void)
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════════════╗\n");
     printf("║                    LATENCY TEST SONUCLARI (Tek Paket)                     ║\n");
+    printf("║            Timestamp mode: %-10s                                     ║\n",
+           g_hwts_enabled ? "HARDWARE" : "SOFTWARE");
     printf("╠══════════╦══════════╦══════════╦══════════╦════════════════╦══════════════╣\n");
     printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (us)  ║    Durum     ║\n");
     printf("╠══════════╬══════════╬══════════╬══════════╬════════════════╬══════════════╣\n");
@@ -2277,6 +2368,37 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     reset_latency_test();
     g_latency_test.test_running = true;
     g_latency_test.test_start_time = rte_rdtsc();
+
+    // ==========================================
+    // Initialize hardware timestamp support
+    // ==========================================
+    printf("=== Initializing Hardware Timestamp Support ===\n");
+
+    // Register dynamic timestamp field (if not already registered)
+    if (hwts_dynfield_offset < 0) {
+        init_hwts_dynfield();
+    }
+
+    // Enable timesync on all ports (for hardware timestamps)
+    int hwts_ports = 0;
+    for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+        if (ports_config->ports[i].is_valid) {
+            int ret = rte_eth_timesync_enable(ports_config->ports[i].port_id);
+            if (ret == 0) {
+                hwts_ports++;
+            }
+        }
+    }
+
+    if (hwts_ports > 0 && hwts_dynfield_offset >= 0) {
+        g_hwts_enabled = true;
+        printf("Hardware timestamp enabled on %d/%u ports\n", hwts_ports, ports_config->nb_ports);
+        printf("Using HARDWARE timestamps for latency measurement\n");
+    } else {
+        g_hwts_enabled = false;
+        printf("Hardware timestamp not available, using SOFTWARE timestamps\n");
+    }
+    printf("\n");
 
     // Pre-initialize test_count and vl_id values for all ports BEFORE starting workers
     // This fixes the race condition where RX workers check test_count before TX workers set it

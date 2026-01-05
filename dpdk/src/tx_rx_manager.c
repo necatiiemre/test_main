@@ -2004,6 +2004,35 @@ static int latency_tx_worker(void *arg)
     g_latency_test.ports[port_id].port_id = port_id;
     g_latency_test.ports[port_id].test_count = vlan_count;
 
+    // ============ WARM-UP PHASE ============
+    // Send warm-up packets to eliminate first-packet penalty (cache, DMA, TX ring warm-up)
+    #define WARMUP_PACKETS_PER_QUEUE 8
+
+    printf("  Port %u: Warm-up phase (%u packets per queue)...\n", port_id, WARMUP_PACKETS_PER_QUEUE);
+
+    // Use first VLAN for warm-up (these packets will be ignored by RX - different VL-ID marker)
+    uint16_t warmup_vlan = vlan_cfg->tx_vlans[0];
+
+    for (uint16_t q = 0; q < NUM_TX_CORES; q++) {
+        for (uint16_t w = 0; w < WARMUP_PACKETS_PER_QUEUE; w++) {
+            struct rte_mbuf *mbuf = rte_pktmbuf_alloc(params->mbuf_pool);
+            if (!mbuf) continue;
+
+            // Build warm-up packet with special VL-ID (0xFFFF) so RX ignores it
+            uint64_t dummy_ts = rte_rdtsc();
+            build_latency_test_packet(mbuf, port_id, warmup_vlan, 0xFFFF, w, dummy_ts);
+
+            uint16_t nb_tx = rte_eth_tx_burst(port_id, q, &mbuf, 1);
+            if (nb_tx == 0) {
+                rte_pktmbuf_free(mbuf);
+            }
+        }
+    }
+
+    // Wait for warm-up packets to be processed
+    rte_delay_us(500);
+
+    // ============ ACTUAL TEST ============
     printf("  Port %u: Sending 1 packet per VLAN (%u VLANs)...\n", port_id, vlan_count);
 
     // Send 1 packet per VLAN using first VL-ID

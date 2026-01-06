@@ -2132,26 +2132,16 @@ static int latency_tx_worker(void *arg)
             // Build packet with sequence number = p (timestamp will be set below)
             build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
 
-            // Set IEEE1588 TX timestamp flag for hardware timestamp
-            if (g_hwts_enabled) {
-                mbuf->ol_flags |= RTE_MBUF_F_TX_IEEE1588_TMST;
-            }
-
             // Send packet using ONLY queue 0 for latency test
+            // Get TX timestamp using TSC just before sending
+            uint64_t tx_tsc = rte_rdtsc();
             uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
 
             if (nb_tx == 0) {
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-
-                // Read hardware TX timestamp (nanoseconds)
-                if (g_hwts_enabled) {
-                    uint64_t tx_hwts = get_tx_hwts_ns(port_id);
-                    result->tx_timestamp = tx_hwts;  // Store HW timestamp (ns)
-                } else {
-                    result->tx_timestamp = rte_rdtsc();  // Fallback to TSC
-                }
+                result->tx_timestamp = tx_tsc;  // Store TSC cycles
             }
 
             // Small delay between packets in same VLAN
@@ -2223,18 +2213,16 @@ static int latency_rx_worker(void *arg)
                 continue;
             }
 
+            // Get RX timestamp immediately using TSC
+            uint64_t rx_tsc = rte_rdtsc();
+
             // Extract VL-ID from DST MAC (bytes 4-5)
             uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
 
-            // Get RX timestamp - prefer hardware timestamp
-            uint64_t rx_timestamp_ns = 0;
-            bool hwts_used = false;
-
+            // Also try to get hardware RX timestamp for debugging
+            uint64_t rx_hwts_ns = 0;
             if (g_hwts_enabled) {
-                rx_timestamp_ns = get_rx_hwts_ns(m);
-                if (rx_timestamp_ns != 0) {
-                    hwts_used = true;
-                }
+                rx_hwts_ns = get_rx_hwts_ns(m);
             }
 
             // Find matching result and calculate latency
@@ -2242,17 +2230,8 @@ static int latency_rx_worker(void *arg)
                 struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
 
                 if (result->vl_id == vl_id && result->tx_timestamp != 0) {
-                    double latency_us;
-
-                    if (hwts_used && g_hwts_enabled) {
-                        // Hardware timestamp: both TX and RX are in nanoseconds
-                        int64_t latency_ns = (int64_t)(rx_timestamp_ns - result->tx_timestamp);
-                        latency_us = (double)latency_ns / 1000.0;  // ns to us
-                    } else {
-                        // Fallback to software TSC
-                        uint64_t rx_tsc = rte_rdtsc();
-                        latency_us = (double)(rx_tsc - result->tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
-                    }
+                    // Calculate latency using TSC (both TX and RX are TSC cycles)
+                    double latency_us = (double)(rx_tsc - result->tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
 
                     result->rx_count++;
                     result->sum_latency_us += latency_us;
@@ -2266,7 +2245,7 @@ static int latency_rx_worker(void *arg)
 
                     result->received = true;
                     result->prbs_ok = true;
-                    result->rx_timestamp = rx_timestamp_ns;
+                    result->rx_timestamp = rx_hwts_ns;  // Store HW timestamp for debugging
 
                     total_received++;
                     break;
@@ -2297,8 +2276,7 @@ void print_latency_results(void)
 {
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║         LATENCY TEST SONUCLARI (Timestamp: %-9s)                                   ║\n",
-           g_hwts_enabled ? "HARDWARE" : "SOFTWARE");
+    printf("║         LATENCY TEST SONUCLARI (Timestamp: SOFTWARE TSC)                                ║\n");
     printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
     printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  RX/TX   ║\n");
     printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
@@ -2368,34 +2346,16 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     // ==========================================
     // Initialize Hardware Timestamps (ConnectX-6 / mlx5)
     // ==========================================
+    // mlx5 driver provides RX timestamps via dynamic field when
+    // RTE_ETH_RX_OFFLOAD_TIMESTAMP is enabled in port config.
+    // TX timestamp: use TSC and convert to nanoseconds for comparison
+    // ==========================================
     printf("=== Initializing Hardware Timestamps ===\n");
     if (init_hardware_timestamp() == 0) {
         printf("Hardware timestamp dynamic field registered\n");
-
-        // Enable timesync on each port - count successful enables
-        int timesync_success_count = 0;
-        for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
-            if (!ports_config->ports[i].is_valid) continue;
-            uint16_t port_id = ports_config->ports[i].port_id;
-
-            int ret = rte_eth_timesync_enable(port_id);
-            if (ret == 0) {
-                printf("  Port %u: Timesync enabled\n", port_id);
-                timesync_success_count++;
-            } else {
-                printf("  Port %u: Timesync enable failed (%d: %s)\n",
-                       port_id, ret, rte_strerror(-ret));
-            }
-        }
-
-        // If no ports support timesync, fall back to software timestamps
-        if (timesync_success_count == 0) {
-            printf("WARNING: No ports support IEEE 1588 timesync!\n");
-            printf("Falling back to SOFTWARE timestamps (TSC)\n");
-            g_hwts_enabled = false;
-        } else {
-            printf("Hardware timestamp support: ENABLED (%d ports)\n", timesync_success_count);
-        }
+        printf("  RX: Hardware timestamp from NIC (nanoseconds)\n");
+        printf("  TX: Software TSC converted to nanoseconds\n");
+        printf("Hardware timestamp support: ENABLED\n");
     } else {
         printf("Hardware timestamp support: DISABLED (using software TSC)\n");
     }

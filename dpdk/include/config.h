@@ -21,7 +21,7 @@
 #endif
 
 #define LATENCY_TEST_TIMEOUT_SEC 5          // Paket bekleme timeout (saniye)
-#define LATENCY_TEST_PACKET_SIZE 1518       // Test paketi boyutu (MAX)
+#define LATENCY_TEST_PACKET_SIZE 1500       // Test paketi boyutu
 
 // ==========================================
 // IMIX (Internet Mix) CONFIGURATION

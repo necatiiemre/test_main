@@ -6,8 +6,79 @@
 #include <rte_cycles.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
+#include <rte_mbuf_dyn.h>     // For hardware timestamp dynamic field
 #include <stdlib.h>
 #include <string.h>
+
+// ==========================================
+// HARDWARE TIMESTAMP SUPPORT (ConnectX-6 / mlx5)
+// ==========================================
+#if LATENCY_TEST_ENABLED
+
+// Global variables for hardware timestamp
+static int g_timestamp_dynfield_offset = -1;
+static uint64_t g_timestamp_rx_dynflag = 0;
+static volatile bool g_hwts_enabled = false;
+
+/**
+ * Initialize hardware timestamp dynamic field
+ * Must be called before starting latency test
+ */
+static int init_hardware_timestamp(void)
+{
+    int ret = rte_mbuf_dyn_rx_timestamp_register(&g_timestamp_dynfield_offset, &g_timestamp_rx_dynflag);
+    if (ret != 0) {
+        printf("Hardware timestamp registration failed: %s\n", rte_strerror(-ret));
+        return -1;
+    }
+
+    printf("Hardware timestamp registered:\n");
+    printf("  Dynamic field offset: %d\n", g_timestamp_dynfield_offset);
+    printf("  RX dynflag: 0x%lx\n", g_timestamp_rx_dynflag);
+
+    g_hwts_enabled = true;
+    return 0;
+}
+
+/**
+ * Read RX timestamp from mbuf dynamic field
+ * Returns timestamp in nanoseconds, or 0 if not available
+ */
+static inline uint64_t get_rx_hwts_ns(struct rte_mbuf *m)
+{
+    if (!g_hwts_enabled || g_timestamp_dynfield_offset < 0)
+        return 0;
+
+    // Check if timestamp flag is set
+    if (!(m->ol_flags & g_timestamp_rx_dynflag))
+        return 0;
+
+    // Read timestamp from dynamic field (nanoseconds)
+    rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
+    return *ts_ptr;
+}
+
+/**
+ * Read TX timestamp from hardware after sending packet
+ * Returns timestamp in nanoseconds
+ */
+static inline uint64_t get_tx_hwts_ns(uint16_t port_id)
+{
+    struct timespec tx_time;
+
+    // Poll for TX timestamp (NIC register read)
+    for (int i = 0; i < 100; i++) {
+        if (rte_eth_timesync_read_tx_timestamp(port_id, &tx_time) == 0) {
+            // Convert to nanoseconds
+            return (uint64_t)tx_time.tv_sec * 1000000000ULL + (uint64_t)tx_time.tv_nsec;
+        }
+        rte_delay_us(1);
+    }
+
+    return 0;  // Timeout - could not read TX timestamp
+}
+
+#endif /* LATENCY_TEST_ENABLED */
 
 // ==========================================
 // GLOBAL VARIABLES
@@ -2058,20 +2129,29 @@ static int latency_tx_worker(void *arg)
                 continue;
             }
 
-            // Get TX timestamp using TSC
-            uint64_t tx_timestamp = rte_rdtsc();
+            // Build packet with sequence number = p (timestamp will be set below)
+            build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
 
-            // Build packet with sequence number = p
-            build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, tx_timestamp);
+            // Set IEEE1588 TX timestamp flag for hardware timestamp
+            if (g_hwts_enabled) {
+                mbuf->ol_flags |= RTE_MBUF_F_TX_IEEE1588_TMST;
+            }
 
-            // Send packet using ONLY queue 0 for latency test (eliminates multi-queue effects)
+            // Send packet using ONLY queue 0 for latency test
             uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
 
             if (nb_tx == 0) {
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-                result->tx_timestamp = tx_timestamp;  // Last TX timestamp
+
+                // Read hardware TX timestamp (nanoseconds)
+                if (g_hwts_enabled) {
+                    uint64_t tx_hwts = get_tx_hwts_ns(port_id);
+                    result->tx_timestamp = tx_hwts;  // Store HW timestamp (ns)
+                } else {
+                    result->tx_timestamp = rte_rdtsc();  // Fallback to TSC
+                }
             }
 
             // Small delay between packets in same VLAN
@@ -2143,24 +2223,37 @@ static int latency_rx_worker(void *arg)
                 continue;
             }
 
-            // Get RX timestamp immediately
-            uint64_t rx_timestamp = rte_rdtsc();
-
-            // Extract TX timestamp from payload
-            uint8_t *payload = pkt + payload_offset;
-            uint64_t tx_timestamp = *(uint64_t *)(payload + SEQ_BYTES);
-
             // Extract VL-ID from DST MAC (bytes 4-5)
             uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
 
-            // Calculate latency using TSC cycles
-            double latency_us = (double)(rx_timestamp - tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+            // Get RX timestamp - prefer hardware timestamp
+            uint64_t rx_timestamp_ns = 0;
+            bool hwts_used = false;
 
-            // Find matching result in source port's results
+            if (g_hwts_enabled) {
+                rx_timestamp_ns = get_rx_hwts_ns(m);
+                if (rx_timestamp_ns != 0) {
+                    hwts_used = true;
+                }
+            }
+
+            // Find matching result and calculate latency
             for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
                 struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
 
-                if (result->vl_id == vl_id) {
+                if (result->vl_id == vl_id && result->tx_timestamp != 0) {
+                    double latency_us;
+
+                    if (hwts_used && g_hwts_enabled) {
+                        // Hardware timestamp: both TX and RX are in nanoseconds
+                        int64_t latency_ns = (int64_t)(rx_timestamp_ns - result->tx_timestamp);
+                        latency_us = (double)latency_ns / 1000.0;  // ns to us
+                    } else {
+                        // Fallback to software TSC
+                        uint64_t rx_tsc = rte_rdtsc();
+                        latency_us = (double)(rx_tsc - result->tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+                    }
+
                     result->rx_count++;
                     result->sum_latency_us += latency_us;
 
@@ -2173,8 +2266,7 @@ static int latency_rx_worker(void *arg)
 
                     result->received = true;
                     result->prbs_ok = true;
-                    result->rx_timestamp = rx_timestamp;
-                    result->latency_cycles = rx_timestamp - tx_timestamp;
+                    result->rx_timestamp = rx_timestamp_ns;
 
                     total_received++;
                     break;
@@ -2205,7 +2297,8 @@ void print_latency_results(void)
 {
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                    LATENCY TEST SONUCLARI (Minimum Latency)                              ║\n");
+    printf("║         LATENCY TEST SONUCLARI (Timestamp: %-9s)                                   ║\n",
+           g_hwts_enabled ? "HARDWARE" : "SOFTWARE");
     printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
     printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  RX/TX   ║\n");
     printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
@@ -2271,6 +2364,31 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     reset_latency_test();
     g_latency_test.test_running = true;
     g_latency_test.test_start_time = rte_rdtsc();
+
+    // ==========================================
+    // Initialize Hardware Timestamps (ConnectX-6 / mlx5)
+    // ==========================================
+    printf("=== Initializing Hardware Timestamps ===\n");
+    if (init_hardware_timestamp() == 0) {
+        printf("Hardware timestamp support: ENABLED\n");
+
+        // Enable timesync on each port
+        for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+            if (!ports_config->ports[i].is_valid) continue;
+            uint16_t port_id = ports_config->ports[i].port_id;
+
+            int ret = rte_eth_timesync_enable(port_id);
+            if (ret == 0) {
+                printf("  Port %u: Timesync enabled\n", port_id);
+            } else {
+                printf("  Port %u: Timesync enable failed (%d: %s)\n",
+                       port_id, ret, rte_strerror(-ret));
+            }
+        }
+    } else {
+        printf("Hardware timestamp support: DISABLED (using software TSC)\n");
+    }
+    printf("\n");
 
     // ==========================================
     // Configure RSS to send ALL packets to queue 0

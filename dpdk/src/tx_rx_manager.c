@@ -2370,9 +2370,10 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     // ==========================================
     printf("=== Initializing Hardware Timestamps ===\n");
     if (init_hardware_timestamp() == 0) {
-        printf("Hardware timestamp support: ENABLED\n");
+        printf("Hardware timestamp dynamic field registered\n");
 
-        // Enable timesync on each port
+        // Enable timesync on each port - count successful enables
+        int timesync_success_count = 0;
         for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
             if (!ports_config->ports[i].is_valid) continue;
             uint16_t port_id = ports_config->ports[i].port_id;
@@ -2380,10 +2381,20 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
             int ret = rte_eth_timesync_enable(port_id);
             if (ret == 0) {
                 printf("  Port %u: Timesync enabled\n", port_id);
+                timesync_success_count++;
             } else {
                 printf("  Port %u: Timesync enable failed (%d: %s)\n",
                        port_id, ret, rte_strerror(-ret));
             }
+        }
+
+        // If no ports support timesync, fall back to software timestamps
+        if (timesync_success_count == 0) {
+            printf("WARNING: No ports support IEEE 1588 timesync!\n");
+            printf("Falling back to SOFTWARE timestamps (TSC)\n");
+            g_hwts_enabled = false;
+        } else {
+            printf("Hardware timestamp support: ENABLED (%d ports)\n", timesync_success_count);
         }
     } else {
         printf("Hardware timestamp support: DISABLED (using software TSC)\n");

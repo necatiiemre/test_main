@@ -2232,18 +2232,28 @@ static int latency_rx_worker(void *arg)
             if (g_hwts_enabled) {
                 // Debug: Print first few packets' ol_flags info
                 static uint32_t debug_count = 0;
-                if (debug_count < 5) {
-                    printf("  DEBUG RX Port %u: ol_flags=0x%lx, expected_flag=0x%lx, has_flag=%d\n",
-                           port_id, (unsigned long)m->ol_flags,
+                if (debug_count < 3) {
+                    printf("  DEBUG RX Port %u:\n", port_id);
+                    printf("    ol_flags = 0x%lx\n", (unsigned long)m->ol_flags);
+                    printf("    dynflag  = 0x%lx (has=%d)\n",
                            (unsigned long)g_timestamp_rx_dynflag,
                            (m->ol_flags & g_timestamp_rx_dynflag) ? 1 : 0);
 
-                    // Also check raw timestamp field
+                    // Check IEEE1588 flag directly
+                    #ifdef RTE_MBUF_F_RX_IEEE1588_TMSTMP
+                    printf("    IEEE1588 = 0x%lx (has=%d)\n",
+                           (unsigned long)RTE_MBUF_F_RX_IEEE1588_TMSTMP,
+                           (m->ol_flags & RTE_MBUF_F_RX_IEEE1588_TMSTMP) ? 1 : 0);
+                    #else
+                    printf("    IEEE1588 flag not defined\n");
+                    #endif
+
+                    // Check dynamic field timestamp
                     if (g_timestamp_dynfield_offset >= 0) {
                         rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-                        printf("  DEBUG RX Port %u: dynfield_offset=%d, raw_timestamp=%lu\n",
-                               port_id, g_timestamp_dynfield_offset, (unsigned long)*ts_ptr);
+                        printf("    dynfield[%d] = %lu\n", g_timestamp_dynfield_offset, (unsigned long)*ts_ptr);
                     }
+
                     debug_count++;
                 }
 

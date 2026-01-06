@@ -2184,6 +2184,9 @@ static int latency_rx_worker(void *arg)
     const uint32_t payload_offset = l2_len + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
     uint32_t total_received = 0;
+    uint32_t mbuf_ts_count = 0;      // Count of packets with mbuf hardware timestamp
+    uint32_t nic_clock_count = 0;    // Count of packets using NIC clock fallback
+    uint32_t tsc_count = 0;          // Count of packets using TSC fallback
 
     struct rte_mbuf *pkts[BURST_SIZE];
     uint64_t timeout_cycles = g_latency_test.tsc_hz * LATENCY_TEST_TIMEOUT_SEC;
@@ -2224,13 +2227,35 @@ static int latency_rx_worker(void *arg)
             // Get RX timestamp - prefer hardware timestamp from NIC
             uint64_t rx_timestamp = 0;
             bool hw_ts_valid = false;
+            bool mbuf_ts_found = false;
 
             if (g_hwts_enabled) {
+                // Debug: Print first few packets' ol_flags info
+                static uint32_t debug_count = 0;
+                if (debug_count < 5) {
+                    printf("  DEBUG RX Port %u: ol_flags=0x%lx, expected_flag=0x%lx, has_flag=%d\n",
+                           port_id, (unsigned long)m->ol_flags,
+                           (unsigned long)g_timestamp_rx_dynflag,
+                           (m->ol_flags & g_timestamp_rx_dynflag) ? 1 : 0);
+
+                    // Also check raw timestamp field
+                    if (g_timestamp_dynfield_offset >= 0) {
+                        rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
+                        printf("  DEBUG RX Port %u: dynfield_offset=%d, raw_timestamp=%lu\n",
+                               port_id, g_timestamp_dynfield_offset, (unsigned long)*ts_ptr);
+                    }
+                    debug_count++;
+                }
+
                 // Check if hardware timestamp flag is set
                 if (m->ol_flags & g_timestamp_rx_dynflag) {
                     rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
                     rx_timestamp = *ts_ptr;
                     hw_ts_valid = (rx_timestamp != 0);
+                    mbuf_ts_found = true;
+                    if (hw_ts_valid) {
+                        mbuf_ts_count++;
+                    }
                 }
 
                 // Fallback to NIC clock if no hardware timestamp in mbuf
@@ -2240,6 +2265,7 @@ static int latency_rx_worker(void *arg)
                     rx_timestamp = get_nic_clock(src_port_id);
                     if (rx_timestamp != 0) {
                         hw_ts_valid = true;  // Using NIC clock as fallback
+                        nic_clock_count++;
                     }
                 }
             }
@@ -2247,6 +2273,7 @@ static int latency_rx_worker(void *arg)
             // Final fallback to TSC if NIC clock also failed
             if (!hw_ts_valid) {
                 rx_timestamp = rte_rdtsc();
+                tsc_count++;
             }
 
             // Find matching result and calculate latency
@@ -2306,7 +2333,8 @@ static int latency_rx_worker(void *arg)
     }
 
     g_latency_test.ports[port_id].rx_complete = true;
-    printf("Latency RX Worker completed: Port %u (%u packets received)\n", port_id, total_received);
+    printf("Latency RX Worker completed: Port %u (%u packets) [TS: mbuf=%u, nic_clock=%u, tsc=%u]\n",
+           port_id, total_received, mbuf_ts_count, nic_clock_count, tsc_count);
     return 0;
 }
 

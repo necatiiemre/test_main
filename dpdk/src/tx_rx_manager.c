@@ -174,8 +174,22 @@ static bool init_timesync(uint16_t num_ports)
     for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
         printf("  Port %u:\n", port);
 
+        // Test 0: Check timesync capabilities
+        struct rte_eth_timesync_cap cap;
+        memset(&cap, 0, sizeof(cap));
+        int ret = rte_eth_timesync_cap_get(port, &cap);
+        printf("    rte_eth_timesync_cap_get(): %d", ret);
+        if (ret == 0) {
+            printf(" (capabilities available)\n");
+            printf("      rx_tstamp_mode: %u\n", cap.rx_tstamp_mode);
+            printf("      tx_tstamp_mode: %u\n", cap.tx_tstamp_mode);
+            printf("      flags: 0x%x\n", cap.flags);
+        } else {
+            printf(" (%s)\n", rte_strerror(-ret));
+        }
+
         // Test 1: rte_eth_timesync_enable
-        int ret = rte_eth_timesync_enable(port);
+        ret = rte_eth_timesync_enable(port);
         printf("    rte_eth_timesync_enable(): %d (%s)\n",
                ret, ret == 0 ? "OK" : rte_strerror(-ret));
 

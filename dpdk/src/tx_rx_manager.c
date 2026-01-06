@@ -681,6 +681,20 @@ int init_port_txrx(uint16_t port_id, struct txrx_config *config)
 
     port_conf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
 
+#if LATENCY_TEST_ENABLED
+    // Hardware Timestamp Debug
+    printf("Port %u: Hardware Timestamp Capability Check:\n", port_id);
+    printf("  rx_offload_capa: 0x%016lx\n", (unsigned long)dev_info.rx_offload_capa);
+    printf("  TIMESTAMP flag:  0x%016lx\n", (unsigned long)RTE_ETH_RX_OFFLOAD_TIMESTAMP);
+
+    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+        printf("  -> SUPPORTED and ENABLED\n");
+    } else {
+        printf("  -> NOT SUPPORTED by driver\n");
+    }
+#endif
+
     ret = rte_eth_dev_configure(
         port_id,
         config->nb_rx_queues,
@@ -727,6 +741,22 @@ int init_port_txrx(uint16_t port_id, struct txrx_config *config)
         printf("Error starting port %u\n", port_id);
         return ret;
     }
+
+#if LATENCY_TEST_ENABLED
+    // Enable IEEE 1588 timesync after port start
+    ret = rte_eth_timesync_enable(port_id);
+    if (ret == 0) {
+        printf("Port %u: rte_eth_timesync_enable() SUCCESS\n", port_id);
+    } else {
+        printf("Port %u: rte_eth_timesync_enable() failed (ret=%d) - may still work with RX_OFFLOAD_TIMESTAMP\n", port_id, ret);
+    }
+
+    // Test NIC clock access
+    uint64_t test_clock = 0;
+    ret = rte_eth_read_clock(port_id, &test_clock);
+    printf("Port %u: rte_eth_read_clock() %s (clock=%lu)\n",
+           port_id, ret == 0 ? "OK" : "FAILED", (unsigned long)test_clock);
+#endif
 
     if (config->nb_rx_queues > 1)
     {

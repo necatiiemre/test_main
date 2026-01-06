@@ -190,7 +190,27 @@ static bool init_timesync(uint16_t num_ports)
             printf(" (%s)\n", rte_strerror(-ret));
         }
 
-        // Test 3: Compare with rte_eth_read_clock
+        // Test 3: rte_eth_timesync_read_rx_timestamp
+        struct timespec rx_ts;
+        ret = rte_eth_timesync_read_rx_timestamp(port, &rx_ts, 0);
+        printf("    rte_eth_timesync_read_rx_timestamp(): %d", ret);
+        if (ret == 0) {
+            printf(" -> %ld.%09ld\n", rx_ts.tv_sec, rx_ts.tv_nsec);
+        } else {
+            printf(" (%s)\n", rte_strerror(-ret));
+        }
+
+        // Test 4: rte_eth_timesync_read_tx_timestamp
+        struct timespec tx_ts;
+        ret = rte_eth_timesync_read_tx_timestamp(port, &tx_ts);
+        printf("    rte_eth_timesync_read_tx_timestamp(): %d", ret);
+        if (ret == 0) {
+            printf(" -> %ld.%09ld\n", tx_ts.tv_sec, tx_ts.tv_nsec);
+        } else {
+            printf(" (%s)\n", rte_strerror(-ret));
+        }
+
+        // Test 5: Compare with rte_eth_read_clock
         uint64_t raw_clock = 0;
         ret = rte_eth_read_clock(port, &raw_clock);
         printf("    rte_eth_read_clock(): %d", ret);

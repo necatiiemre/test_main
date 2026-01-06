@@ -20,6 +20,68 @@ static int g_timestamp_dynfield_offset = -1;
 static uint64_t g_timestamp_rx_dynflag = 0;
 static volatile bool g_hwts_enabled = false;
 
+// Clock offset calibration for multi-NIC setups
+// Each NIC has its own clock, we need to calibrate offsets
+static int64_t g_clock_offset[MAX_PORTS];  // Offset relative to port 0
+static bool g_clock_calibrated = false;
+
+/**
+ * Calibrate clock offsets between different NICs
+ * This allows accurate latency measurement across different NICs
+ * by compensating for clock differences
+ */
+static void calibrate_clock_offsets(uint16_t num_ports)
+{
+    printf("=== Calibrating NIC Clock Offsets ===\n");
+
+    // Read all clocks as close together as possible
+    uint64_t clocks[MAX_PORTS];
+    memset(clocks, 0, sizeof(clocks));
+    memset(g_clock_offset, 0, sizeof(g_clock_offset));
+
+    // Read port 0 as reference
+    uint64_t ref_clock = 0;
+    int ret = rte_eth_read_clock(0, &ref_clock);
+    if (ret != 0) {
+        printf("  Warning: Cannot read clock from port 0, calibration disabled\n");
+        return;
+    }
+    clocks[0] = ref_clock;
+    g_clock_offset[0] = 0;
+
+    printf("  Port 0 (reference): clock = %lu\n", (unsigned long)ref_clock);
+
+    // Read other ports and calculate offsets
+    for (uint16_t port = 1; port < num_ports && port < MAX_PORTS; port++) {
+        ret = rte_eth_read_clock(port, &clocks[port]);
+        if (ret == 0) {
+            g_clock_offset[port] = (int64_t)(clocks[port] - ref_clock);
+            printf("  Port %u: clock = %lu, offset = %+ld ns (%+.3f ms)\n",
+                   port,
+                   (unsigned long)clocks[port],
+                   (long)g_clock_offset[port],
+                   (double)g_clock_offset[port] / 1000000.0);
+        } else {
+            printf("  Port %u: clock read FAILED\n", port);
+            g_clock_offset[port] = 0;
+        }
+    }
+
+    g_clock_calibrated = true;
+    printf("  Clock calibration complete\n\n");
+}
+
+/**
+ * Get calibrated timestamp - applies offset correction
+ */
+static inline int64_t get_calibrated_timestamp(uint64_t raw_timestamp, uint16_t port_id)
+{
+    if (!g_clock_calibrated || port_id >= MAX_PORTS) {
+        return (int64_t)raw_timestamp;
+    }
+    return (int64_t)raw_timestamp - g_clock_offset[port_id];
+}
+
 /**
  * Initialize hardware timestamp dynamic field
  * Must be called before starting latency test
@@ -2323,15 +2385,19 @@ static int latency_rx_worker(void *arg)
                 if (result->vl_id == vl_id && result->tx_timestamp != 0) {
                     double latency_us;
 
-                    // Calculate latency based on clock source
-                    int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
-
                     if (hw_ts_valid && g_hwts_enabled) {
-                        // NIC clock - ~1 GHz, so delta is in nanoseconds
-                        // (both TX and RX use same NIC clock)
+                        // NIC clock with offset calibration
+                        // TX timestamp is from src_port_id, RX timestamp is from port_id
+                        // Apply offset correction to compensate for different NIC clocks
+                        int64_t calibrated_tx = get_calibrated_timestamp(result->tx_timestamp, src_port_id);
+                        int64_t calibrated_rx = get_calibrated_timestamp(rx_timestamp, port_id);
+                        int64_t delta = calibrated_rx - calibrated_tx;
+
+                        // NIC clock is ~1 GHz, so delta is in nanoseconds
                         latency_us = (double)delta / 1000.0;
                     } else {
-                        // Software TSC fallback
+                        // Software TSC fallback (no calibration needed - same clock source)
+                        int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
                         latency_us = (double)delta * 1000000.0 / g_latency_test.tsc_hz;
                     }
 
@@ -2487,6 +2553,9 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
             printf("Hardware timestamp support: ENABLED\n");
             printf("  TX: rte_eth_read_clock() for NIC clock\n");
             printf("  RX: mbuf dynamic field timestamp\n");
+
+            // Calibrate clock offsets between different NICs
+            calibrate_clock_offsets(ports_config->nb_ports);
         }
     } else {
         printf("Hardware timestamp support: DISABLED (using software TSC)\n");

@@ -2401,10 +2401,23 @@ static int latency_rx_worker(void *arg)
                         latency_us = (double)delta * 1000000.0 / g_latency_test.tsc_hz;
                     }
 
-                    // Sanity check - if negative or too large, skip
-                    if (latency_us < 0 || latency_us > 1000000.0) {
+                    // Sanity check - allow small negative values due to calibration timing errors
+                    // Calibration reads clocks sequentially, introducing small errors (~1-10ms)
+                    if (latency_us < -1000.0 || latency_us > 1000000.0) {
+                        // Debug: print rejected values
+                        static uint32_t reject_count = 0;
+                        if (reject_count < 10) {
+                            printf("  [LATENCY REJECTED] Port %u->%u VL %u: %.2f us (out of range)\n",
+                                   src_port_id, port_id, vl_id, latency_us);
+                            reject_count++;
+                        }
                         rte_pktmbuf_free(m);
                         continue;
+                    }
+
+                    // Clamp small negative values to 0 (calibration error)
+                    if (latency_us < 0) {
+                        latency_us = 0.0;
                     }
 
                     result->rx_count++;

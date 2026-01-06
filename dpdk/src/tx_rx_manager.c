@@ -27,43 +27,49 @@ static bool g_clock_calibrated = false;
 
 /**
  * Calibrate clock offsets between different NICs
- * This allows accurate latency measurement across different NICs
- * by compensating for clock differences
+ * Uses paired reads (ref->port->ref) to minimize timing errors
  */
 static void calibrate_clock_offsets(uint16_t num_ports)
 {
     printf("=== Calibrating NIC Clock Offsets ===\n");
 
-    // Read all clocks as close together as possible
-    uint64_t clocks[MAX_PORTS];
-    memset(clocks, 0, sizeof(clocks));
     memset(g_clock_offset, 0, sizeof(g_clock_offset));
 
-    // Read port 0 as reference
-    uint64_t ref_clock = 0;
-    int ret = rte_eth_read_clock(0, &ref_clock);
-    if (ret != 0) {
-        printf("  Warning: Cannot read clock from port 0, calibration disabled\n");
-        return;
-    }
-    clocks[0] = ref_clock;
+    // For each port, do paired reads: ref_before -> port -> ref_after
+    // The true offset is: port_clock - (ref_before + ref_after) / 2
+    // This compensates for the time spent reading
+    #define CALIBRATION_ROUNDS 10
+
+    printf("  Running %d calibration rounds per port...\n", CALIBRATION_ROUNDS);
+    printf("  Port 0 (reference): offset = 0\n");
     g_clock_offset[0] = 0;
 
-    printf("  Port 0 (reference): clock = %lu\n", (unsigned long)ref_clock);
-
-    // Read other ports and calculate offsets
     for (uint16_t port = 1; port < num_ports && port < MAX_PORTS; port++) {
-        ret = rte_eth_read_clock(port, &clocks[port]);
-        if (ret == 0) {
-            g_clock_offset[port] = (int64_t)(clocks[port] - ref_clock);
-            printf("  Port %u: clock = %lu, offset = %+ld ns (%+.3f ms)\n",
-                   port,
-                   (unsigned long)clocks[port],
-                   (long)g_clock_offset[port],
-                   (double)g_clock_offset[port] / 1000000.0);
+        int64_t total_offset = 0;
+        int valid_rounds = 0;
+
+        for (int round = 0; round < CALIBRATION_ROUNDS; round++) {
+            uint64_t ref_before = 0, port_clock = 0, ref_after = 0;
+
+            // Paired read: ref -> port -> ref
+            if (rte_eth_read_clock(0, &ref_before) != 0) continue;
+            if (rte_eth_read_clock(port, &port_clock) != 0) continue;
+            if (rte_eth_read_clock(0, &ref_after) != 0) continue;
+
+            // Calculate offset using midpoint of reference reads
+            int64_t ref_mid = (int64_t)(ref_before + ref_after) / 2;
+            int64_t offset = (int64_t)port_clock - ref_mid;
+
+            total_offset += offset;
+            valid_rounds++;
+        }
+
+        if (valid_rounds > 0) {
+            g_clock_offset[port] = total_offset / valid_rounds;
+            printf("  Port %u: offset = %+.3f ms\n",
+                   port, (double)g_clock_offset[port] / 1000000.0);
         } else {
-            printf("  Port %u: clock read FAILED\n", port);
-            g_clock_offset[port] = 0;
+            printf("  Port %u: calibration FAILED\n", port);
         }
     }
 

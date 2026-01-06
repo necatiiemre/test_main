@@ -10,6 +10,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+// PHC (PTP Hardware Clock) support for timestamp comparison
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <errno.h>
+
+// Macros for converting PHC fd to clockid_t
+#ifndef CLOCKFD
+#define CLOCKFD 3
+#endif
+#ifndef FD_TO_CLOCKID
+#define FD_TO_CLOCKID(fd) ((clockid_t) ((((unsigned int) ~(fd)) << 3) | CLOCKFD))
+#endif
+
 // ==========================================
 // HARDWARE TIMESTAMP SUPPORT (ConnectX-6 / mlx5)
 // ==========================================
@@ -138,6 +152,212 @@ static inline uint64_t get_nic_clock(uint16_t port_id)
         return 0;  // Failed to read NIC clock
     }
     return clock_value;
+}
+
+// ==========================================
+// PHC (PTP HARDWARE CLOCK) COMPARISON SUPPORT
+// ==========================================
+
+// PHC file descriptors per port (for reading PTP-adjusted time)
+static int g_phc_fd[MAX_PORTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
+static bool g_phc_enabled = false;
+
+// Port to PTP device mapping for ConnectX-6 NICs
+// Typical mapping (may vary by system):
+//   Port 0,1 -> /dev/ptp6 (NIC 0)
+//   Port 2,3 -> /dev/ptp8 (NIC 1)
+//   Port 4,5 -> /dev/ptp10 (NIC 2)
+//   Port 6,7 -> /dev/ptp12 (NIC 3)
+static const char* port_to_ptp_device(uint16_t port_id) {
+    static const char* ptp_devices[] = {
+        "/dev/ptp6",  // Port 0
+        "/dev/ptp6",  // Port 1 (same NIC as port 0)
+        "/dev/ptp8",  // Port 2
+        "/dev/ptp8",  // Port 3 (same NIC as port 2)
+        "/dev/ptp10", // Port 4
+        "/dev/ptp10", // Port 5 (same NIC as port 4)
+        "/dev/ptp12", // Port 6
+        "/dev/ptp12"  // Port 7 (same NIC as port 6)
+    };
+    if (port_id < 8) {
+        return ptp_devices[port_id];
+    }
+    return "/dev/ptp0";
+}
+
+/**
+ * Initialize PHC devices for all ports
+ * Opens /dev/ptpX devices for reading PTP-adjusted timestamps
+ */
+static void init_phc_devices(uint16_t num_ports)
+{
+    printf("\n=== Initializing PHC (PTP Hardware Clock) Devices ===\n");
+
+    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
+        const char* ptp_dev = port_to_ptp_device(port);
+
+        // Check if we already opened this PHC (same NIC)
+        if (port > 0 && strcmp(ptp_dev, port_to_ptp_device(port - 1)) == 0) {
+            g_phc_fd[port] = g_phc_fd[port - 1];
+            printf("  Port %u: Reusing PHC fd from port %u (%s)\n",
+                   port, port - 1, ptp_dev);
+            continue;
+        }
+
+        int fd = open(ptp_dev, O_RDONLY);
+        if (fd < 0) {
+            printf("  Port %u: Failed to open %s (errno=%d)\n", port, ptp_dev, errno);
+            g_phc_fd[port] = -1;
+        } else {
+            g_phc_fd[port] = fd;
+            printf("  Port %u: Opened %s (fd=%d)\n", port, ptp_dev, fd);
+        }
+    }
+
+    // Check if at least one PHC is available
+    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
+        if (g_phc_fd[port] >= 0) {
+            g_phc_enabled = true;
+            break;
+        }
+    }
+
+    if (g_phc_enabled) {
+        printf("  PHC comparison enabled\n");
+    } else {
+        printf("  WARNING: No PHC devices available, comparison disabled\n");
+    }
+    printf("\n");
+}
+
+/**
+ * Read PTP-adjusted time from PHC for a specific port
+ * Returns time in nanoseconds since epoch, or 0 if failed
+ */
+static inline uint64_t get_phc_time_ns(uint16_t port_id)
+{
+    if (port_id >= MAX_PORTS || g_phc_fd[port_id] < 0) {
+        return 0;
+    }
+
+    struct timespec ts;
+    clockid_t clkid = FD_TO_CLOCKID(g_phc_fd[port_id]);
+
+    if (clock_gettime(clkid, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/**
+ * Detailed PHC vs mbuf timestamp comparison
+ * Prints comprehensive debug info to determine if mbuf timestamps are PTP-adjusted
+ */
+static void compare_phc_and_mbuf_timestamp(uint16_t port_id, struct rte_mbuf *m,
+                                           uint64_t mbuf_ts, bool has_mbuf_ts)
+{
+    static uint32_t compare_count = 0;
+    if (compare_count >= 5) return;  // Only first 5 packets
+
+    printf("\n=== PHC vs mbuf Timestamp Comparison [Packet %u, Port %u] ===\n",
+           compare_count + 1, port_id);
+
+    // 1. Get PHC time (PTP-adjusted)
+    uint64_t phc_time_ns = get_phc_time_ns(port_id);
+
+    // 2. Get raw NIC clock
+    uint64_t nic_clock = 0;
+    rte_eth_read_clock(port_id, &nic_clock);
+
+    // 3. Print all timestamp sources
+    printf("  mbuf timestamp:\n");
+    if (has_mbuf_ts && mbuf_ts != 0) {
+        printf("    Value: %lu (~%.3f sec from some epoch)\n",
+               (unsigned long)mbuf_ts, (double)mbuf_ts / 1e9);
+        printf("    ol_flags: 0x%lx\n", (unsigned long)m->ol_flags);
+    } else {
+        printf("    NOT AVAILABLE (has=%d, value=%lu)\n", has_mbuf_ts, (unsigned long)mbuf_ts);
+    }
+
+    printf("  PHC time (PTP-adjusted):\n");
+    if (phc_time_ns != 0) {
+        time_t sec = phc_time_ns / 1000000000ULL;
+        struct tm *tm_info = localtime(&sec);
+        char time_str[64];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+        printf("    Value: %lu ns\n", (unsigned long)phc_time_ns);
+        printf("    Human: %s.%09lu\n", time_str, phc_time_ns % 1000000000ULL);
+    } else {
+        printf("    NOT AVAILABLE\n");
+    }
+
+    printf("  NIC raw clock (rte_eth_read_clock):\n");
+    printf("    Value: %lu (~%.3f sec from unknown epoch)\n",
+           (unsigned long)nic_clock, (double)nic_clock / 1e9);
+
+    // 4. Compare mbuf timestamp with both sources
+    if (has_mbuf_ts && mbuf_ts != 0) {
+        printf("  Analysis:\n");
+
+        // Check if mbuf_ts is close to PHC time (within 1 second)
+        int64_t diff_from_phc = (int64_t)mbuf_ts - (int64_t)phc_time_ns;
+        printf("    mbuf_ts - PHC time = %+.6f ms\n", (double)diff_from_phc / 1e6);
+
+        // Check if mbuf_ts is close to raw NIC clock
+        int64_t diff_from_nic = (int64_t)mbuf_ts - (int64_t)nic_clock;
+        printf("    mbuf_ts - NIC clock = %+.6f ms\n", (double)diff_from_nic / 1e6);
+
+        // Determine if mbuf timestamp is PTP-adjusted or raw
+        if (phc_time_ns != 0) {
+            double abs_diff_phc = (diff_from_phc > 0) ? diff_from_phc : -diff_from_phc;
+            double abs_diff_nic = (diff_from_nic > 0) ? diff_from_nic : -diff_from_nic;
+
+            if (abs_diff_phc < 1e9) {  // Within 1 second of PHC
+                printf("    CONCLUSION: mbuf timestamp appears to be PTP-ADJUSTED!\n");
+                printf("                (close to PHC time, diff=%.3f ms)\n", (double)diff_from_phc / 1e6);
+            } else if (abs_diff_nic < 1e9) {  // Within 1 second of raw NIC clock
+                printf("    CONCLUSION: mbuf timestamp appears to be RAW NIC COUNTER\n");
+                printf("                (close to raw NIC clock, diff=%.3f ms)\n", (double)diff_from_nic / 1e6);
+            } else {
+                printf("    CONCLUSION: UNCLEAR - neither close to PHC nor raw NIC clock\n");
+                printf("                PHC diff = %.3f sec, NIC diff = %.3f sec\n",
+                       (double)diff_from_phc / 1e9, (double)diff_from_nic / 1e9);
+            }
+        }
+    }
+
+    printf("=========================================================\n\n");
+    compare_count++;
+}
+
+/**
+ * Close PHC file descriptors
+ */
+static void cleanup_phc_devices(void)
+{
+    int closed_count = 0;
+    for (int port = 0; port < MAX_PORTS; port++) {
+        if (g_phc_fd[port] >= 0) {
+            // Don't close if same fd was used by previous port
+            bool already_closed = false;
+            for (int p = 0; p < port; p++) {
+                if (g_phc_fd[p] == g_phc_fd[port]) {
+                    already_closed = true;
+                    break;
+                }
+            }
+            if (!already_closed) {
+                close(g_phc_fd[port]);
+                closed_count++;
+            }
+            g_phc_fd[port] = -1;
+        }
+    }
+    if (closed_count > 0) {
+        printf("Closed %d PHC device(s)\n", closed_count);
+    }
+    g_phc_enabled = false;
 }
 
 #endif /* LATENCY_TEST_ENABLED */
@@ -2366,6 +2586,16 @@ static int latency_rx_worker(void *arg)
                     }
                 }
 
+                // PHC vs mbuf timestamp comparison (first 5 packets)
+                if (g_phc_enabled) {
+                    uint64_t mbuf_ts_for_compare = 0;
+                    if (g_timestamp_dynfield_offset >= 0) {
+                        rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
+                        mbuf_ts_for_compare = *ts_ptr;
+                    }
+                    compare_phc_and_mbuf_timestamp(port_id, m, mbuf_ts_for_compare, has_hw_ts_flag);
+                }
+
                 // Fallback to NIC clock if no hardware timestamp in mbuf
                 // Use port_id (RX port) clock - same physical clock as TX port on same NIC
                 // Port pairing: 0↔7, 1↔6, 2↔5, 3↔4 (same NIC = same clock)
@@ -2575,6 +2805,9 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
 
             // Calibrate clock offsets between different NICs
             calibrate_clock_offsets(ports_config->nb_ports);
+
+            // Initialize PHC devices for PTP-adjusted timestamp comparison
+            init_phc_devices(ports_config->nb_ports);
         }
     } else {
         printf("Hardware timestamp support: DISABLED (using software TSC)\n");
@@ -2783,6 +3016,9 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
 
     // Print results
     print_latency_results();
+
+    // Cleanup PHC devices
+    cleanup_phc_devices();
 
     printf("=== Latency Test Complete, Switching to Normal Mode ===\n\n");
     return 0;

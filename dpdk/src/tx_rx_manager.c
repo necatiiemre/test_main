@@ -2232,9 +2232,18 @@ static int latency_rx_worker(void *arg)
                     rx_timestamp = *ts_ptr;
                     hw_ts_valid = (rx_timestamp != 0);
                 }
+
+                // Fallback to NIC clock if no hardware timestamp in mbuf
+                // (TX uses NIC clock, so we need same clock source)
+                if (!hw_ts_valid) {
+                    rx_timestamp = get_nic_clock(port_id);
+                    if (rx_timestamp != 0) {
+                        hw_ts_valid = true;  // Using NIC clock as fallback
+                    }
+                }
             }
 
-            // Fallback to TSC if no hardware timestamp
+            // Final fallback to TSC if NIC clock also failed
             if (!hw_ts_valid) {
                 rx_timestamp = rte_rdtsc();
             }
@@ -2246,13 +2255,12 @@ static int latency_rx_worker(void *arg)
                 if (result->vl_id == vl_id && result->tx_timestamp != 0) {
                     double latency_us;
 
-                    // Both TX (NIC clock) and RX (NIC timestamp) should be in same units
-                    // NIC clock is typically in nanoseconds or clock cycles
-                    // Try assuming both are in same clock domain
+                    // Calculate latency based on clock source
                     int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
 
                     if (hw_ts_valid && g_hwts_enabled) {
-                        // Hardware timestamp - assume nanoseconds
+                        // NIC clock - ~1 GHz, so delta is in nanoseconds
+                        // (both TX and RX use same NIC clock)
                         latency_us = (double)delta / 1000.0;
                     } else {
                         // Software TSC fallback

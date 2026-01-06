@@ -2234,9 +2234,10 @@ static int latency_rx_worker(void *arg)
                 }
 
                 // Fallback to NIC clock if no hardware timestamp in mbuf
-                // (TX uses NIC clock, so we need same clock source)
+                // IMPORTANT: Use src_port_id (TX port) clock, not port_id (RX port)
+                // because TX timestamp was read from src_port_id's clock
                 if (!hw_ts_valid) {
-                    rx_timestamp = get_nic_clock(port_id);
+                    rx_timestamp = get_nic_clock(src_port_id);
                     if (rx_timestamp != 0) {
                         hw_ts_valid = true;  // Using NIC clock as fallback
                     }

@@ -211,9 +211,20 @@ int configure_port(uint16_t port_id)
     ret = rte_eth_dev_configure(port_id, 1, 1, &port_conf);
     if (ret < 0)
     {
-        printf("Error: Cannot configure port %u\n", port_id);
+        printf("Error: Cannot configure port %u (ret=%d)\n", port_id, ret);
         return ret;
     }
+
+#if LATENCY_TEST_ENABLED
+    // Enable timesync at hardware level after port configuration
+    // This is critical for clock synchronization on ConnectX-6 cards
+    ret = rte_eth_timesync_enable(port_id);
+    if (ret < 0) {
+        printf("Port %u: Hardware timesync enable failed (ret=%d, driver may not support)\n", port_id, ret);
+    } else {
+        printf("Port %u: Hardware timesync enabled successfully\n", port_id);
+    }
+#endif
 
     printf("Port %u configured successfully\n", port_id);
     return 0;
@@ -364,6 +375,10 @@ void cleanup_ports(struct ports_config *config)
     {
         if (config->ports[i].is_valid)
         {
+#if LATENCY_TEST_ENABLED
+            // Disable timesync before stopping port
+            rte_eth_timesync_disable(config->ports[i].port_id);
+#endif
             rte_eth_dev_stop(config->ports[i].port_id);
             rte_eth_dev_close(config->ports[i].port_id);
         }

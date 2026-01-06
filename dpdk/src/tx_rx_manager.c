@@ -2127,22 +2127,17 @@ static int latency_tx_worker(void *arg)
             build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
 
             // Send packet using ONLY queue 0 for latency test
-            // Get TX timestamp from NIC clock just before sending
-            // This uses same clock source as RX hardware timestamps
-            uint64_t tx_nic_clock = 0;
-            if (g_hwts_enabled) {
-                tx_nic_clock = get_nic_clock(port_id);
-            }
-
             uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
 
             if (nb_tx == 0) {
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-                // Store NIC clock if available, otherwise use TSC
-                if (tx_nic_clock != 0) {
-                    result->tx_timestamp = tx_nic_clock;
+                // Get TX timestamp AFTER sending for accuracy
+                // Read from this port's NIC clock (same clock as RX port on same NIC)
+                if (g_hwts_enabled) {
+                    uint64_t tx_nic_clock = get_nic_clock(port_id);
+                    result->tx_timestamp = (tx_nic_clock != 0) ? tx_nic_clock : rte_rdtsc();
                 } else {
                     result->tx_timestamp = rte_rdtsc();
                 }
@@ -2257,8 +2252,13 @@ static int latency_rx_worker(void *arg)
                     debug_count++;
                 }
 
-                // Check if hardware timestamp flag is set
-                if (m->ol_flags & g_timestamp_rx_dynflag) {
+                // Check if hardware timestamp flag is set (dynamic flag or IEEE1588)
+                bool has_hw_ts_flag = (m->ol_flags & g_timestamp_rx_dynflag) != 0;
+                #ifdef RTE_MBUF_F_RX_IEEE1588_TMSTMP
+                has_hw_ts_flag = has_hw_ts_flag || ((m->ol_flags & RTE_MBUF_F_RX_IEEE1588_TMSTMP) != 0);
+                #endif
+
+                if (has_hw_ts_flag && g_timestamp_dynfield_offset >= 0) {
                     rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
                     rx_timestamp = *ts_ptr;
                     hw_ts_valid = (rx_timestamp != 0);
@@ -2269,10 +2269,10 @@ static int latency_rx_worker(void *arg)
                 }
 
                 // Fallback to NIC clock if no hardware timestamp in mbuf
-                // IMPORTANT: Use src_port_id (TX port) clock, not port_id (RX port)
-                // because TX timestamp was read from src_port_id's clock
+                // Use port_id (RX port) clock - same physical clock as TX port on same NIC
+                // Port pairing: 0↔7, 1↔6, 2↔5, 3↔4 (same NIC = same clock)
                 if (!hw_ts_valid) {
-                    rx_timestamp = get_nic_clock(src_port_id);
+                    rx_timestamp = get_nic_clock(port_id);
                     if (rx_timestamp != 0) {
                         hw_ts_valid = true;  // Using NIC clock as fallback
                         nic_clock_count++;

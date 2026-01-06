@@ -59,23 +59,17 @@ static inline uint64_t get_rx_hwts_ns(struct rte_mbuf *m)
 }
 
 /**
- * Read TX timestamp from hardware after sending packet
- * Returns timestamp in nanoseconds
+ * Read current NIC clock value for TX timestamp
+ * Uses rte_eth_read_clock() - same clock source as RX timestamps
  */
-static inline uint64_t get_tx_hwts_ns(uint16_t port_id)
+static inline uint64_t get_nic_clock(uint16_t port_id)
 {
-    struct timespec tx_time;
-
-    // Poll for TX timestamp (NIC register read)
-    for (int i = 0; i < 100; i++) {
-        if (rte_eth_timesync_read_tx_timestamp(port_id, &tx_time) == 0) {
-            // Convert to nanoseconds
-            return (uint64_t)tx_time.tv_sec * 1000000000ULL + (uint64_t)tx_time.tv_nsec;
-        }
-        rte_delay_us(1);
+    uint64_t clock_value = 0;
+    int ret = rte_eth_read_clock(port_id, &clock_value);
+    if (ret != 0) {
+        return 0;  // Failed to read NIC clock
     }
-
-    return 0;  // Timeout - could not read TX timestamp
+    return clock_value;
 }
 
 #endif /* LATENCY_TEST_ENABLED */
@@ -2133,15 +2127,25 @@ static int latency_tx_worker(void *arg)
             build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
 
             // Send packet using ONLY queue 0 for latency test
-            // Get TX timestamp using TSC just before sending
-            uint64_t tx_tsc = rte_rdtsc();
+            // Get TX timestamp from NIC clock just before sending
+            // This uses same clock source as RX hardware timestamps
+            uint64_t tx_nic_clock = 0;
+            if (g_hwts_enabled) {
+                tx_nic_clock = get_nic_clock(port_id);
+            }
+
             uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
 
             if (nb_tx == 0) {
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-                result->tx_timestamp = tx_tsc;  // Store TSC cycles
+                // Store NIC clock if available, otherwise use TSC
+                if (tx_nic_clock != 0) {
+                    result->tx_timestamp = tx_nic_clock;
+                } else {
+                    result->tx_timestamp = rte_rdtsc();
+                }
             }
 
             // Small delay between packets in same VLAN
@@ -2213,16 +2217,26 @@ static int latency_rx_worker(void *arg)
                 continue;
             }
 
-            // Get RX timestamp immediately using TSC
-            uint64_t rx_tsc = rte_rdtsc();
-
             // Extract VL-ID from DST MAC (bytes 4-5)
-            uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+            uint8_t *pkt_data = pkt;
+            uint16_t vl_id = ((uint16_t)pkt_data[4] << 8) | pkt_data[5];
 
-            // Also try to get hardware RX timestamp for debugging
-            uint64_t rx_hwts_ns = 0;
+            // Get RX timestamp - prefer hardware timestamp from NIC
+            uint64_t rx_timestamp = 0;
+            bool hw_ts_valid = false;
+
             if (g_hwts_enabled) {
-                rx_hwts_ns = get_rx_hwts_ns(m);
+                // Check if hardware timestamp flag is set
+                if (m->ol_flags & g_timestamp_rx_dynflag) {
+                    rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
+                    rx_timestamp = *ts_ptr;
+                    hw_ts_valid = (rx_timestamp != 0);
+                }
+            }
+
+            // Fallback to TSC if no hardware timestamp
+            if (!hw_ts_valid) {
+                rx_timestamp = rte_rdtsc();
             }
 
             // Find matching result and calculate latency
@@ -2230,8 +2244,26 @@ static int latency_rx_worker(void *arg)
                 struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
 
                 if (result->vl_id == vl_id && result->tx_timestamp != 0) {
-                    // Calculate latency using TSC (both TX and RX are TSC cycles)
-                    double latency_us = (double)(rx_tsc - result->tx_timestamp) * 1000000.0 / g_latency_test.tsc_hz;
+                    double latency_us;
+
+                    // Both TX (NIC clock) and RX (NIC timestamp) should be in same units
+                    // NIC clock is typically in nanoseconds or clock cycles
+                    // Try assuming both are in same clock domain
+                    int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
+
+                    if (hw_ts_valid && g_hwts_enabled) {
+                        // Hardware timestamp - assume nanoseconds
+                        latency_us = (double)delta / 1000.0;
+                    } else {
+                        // Software TSC fallback
+                        latency_us = (double)delta * 1000000.0 / g_latency_test.tsc_hz;
+                    }
+
+                    // Sanity check - if negative or too large, skip
+                    if (latency_us < 0 || latency_us > 1000000.0) {
+                        rte_pktmbuf_free(m);
+                        continue;
+                    }
 
                     result->rx_count++;
                     result->sum_latency_us += latency_us;
@@ -2245,7 +2277,7 @@ static int latency_rx_worker(void *arg)
 
                     result->received = true;
                     result->prbs_ok = true;
-                    result->rx_timestamp = rx_hwts_ns;  // Store HW timestamp for debugging
+                    result->rx_timestamp = rx_timestamp;
 
                     total_received++;
                     break;
@@ -2276,7 +2308,8 @@ void print_latency_results(void)
 {
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║         LATENCY TEST SONUCLARI (Timestamp: SOFTWARE TSC)                                ║\n");
+    printf("║         LATENCY TEST SONUCLARI (Timestamp: %s)                                ║\n",
+           g_hwts_enabled ? "HARDWARE NIC" : "SOFTWARE TSC");
     printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
     printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  RX/TX   ║\n");
     printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
@@ -2346,16 +2379,38 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     // ==========================================
     // Initialize Hardware Timestamps (ConnectX-6 / mlx5)
     // ==========================================
-    // mlx5 driver provides RX timestamps via dynamic field when
-    // RTE_ETH_RX_OFFLOAD_TIMESTAMP is enabled in port config.
-    // TX timestamp: use TSC and convert to nanoseconds for comparison
-    // ==========================================
     printf("=== Initializing Hardware Timestamps ===\n");
     if (init_hardware_timestamp() == 0) {
         printf("Hardware timestamp dynamic field registered\n");
-        printf("  RX: Hardware timestamp from NIC (nanoseconds)\n");
-        printf("  TX: Software TSC converted to nanoseconds\n");
-        printf("Hardware timestamp support: ENABLED\n");
+
+        // Test rte_eth_read_clock() on first valid port
+        for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
+            if (!ports_config->ports[i].is_valid) continue;
+            uint16_t port_id = ports_config->ports[i].port_id;
+
+            uint64_t clock1 = 0, clock2 = 0;
+            int ret1 = rte_eth_read_clock(port_id, &clock1);
+            rte_delay_us(1000);  // 1ms delay
+            int ret2 = rte_eth_read_clock(port_id, &clock2);
+
+            if (ret1 == 0 && ret2 == 0) {
+                uint64_t clock_diff = clock2 - clock1;
+                // Estimate clock frequency (should be ~1GHz for mlx5)
+                double clock_freq_mhz = (double)clock_diff / 1000.0;  // cycles per ms -> MHz
+                printf("  Port %u: rte_eth_read_clock() OK\n", port_id);
+                printf("    Clock diff in 1ms: %lu cycles (~%.1f MHz)\n", clock_diff, clock_freq_mhz);
+            } else {
+                printf("  Port %u: rte_eth_read_clock() FAILED (ret=%d)\n", port_id, ret1);
+                g_hwts_enabled = false;
+            }
+            break;  // Only test first port
+        }
+
+        if (g_hwts_enabled) {
+            printf("Hardware timestamp support: ENABLED\n");
+            printf("  TX: rte_eth_read_clock() for NIC clock\n");
+            printf("  RX: mbuf dynamic field timestamp\n");
+        }
     } else {
         printf("Hardware timestamp support: DISABLED (using software TSC)\n");
     }

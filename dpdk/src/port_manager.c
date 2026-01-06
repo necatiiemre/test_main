@@ -199,11 +199,16 @@ int configure_port(uint16_t port_id)
 
 #if LATENCY_TEST_ENABLED
     // Enable RX timestamp offload for latency measurement (ConnectX-6 / mlx5)
+    printf("Port %u: Hardware Timestamp Debug:\n", port_id);
+    printf("  rx_offload_capa: 0x%016lx\n", (unsigned long)dev_info.rx_offload_capa);
+    printf("  TIMESTAMP flag:  0x%016lx\n", (unsigned long)RTE_ETH_RX_OFFLOAD_TIMESTAMP);
+    printf("  Supported: %s\n", (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) ? "YES" : "NO");
+
     if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
         port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
-        printf("Port %u: RX Timestamp offload enabled\n", port_id);
+        printf("  -> RX Timestamp offload ENABLED in config\n");
     } else {
-        printf("Port %u: RX Timestamp offload NOT supported\n", port_id);
+        printf("  -> RX Timestamp offload NOT supported by driver\n");
     }
 #endif
 
@@ -217,12 +222,24 @@ int configure_port(uint16_t port_id)
 
 #if LATENCY_TEST_ENABLED
     // Enable timesync at hardware level after port configuration
-    // This is critical for clock synchronization on ConnectX-6 cards
+    // This is required for IEEE 1588 PTP timestamps
     ret = rte_eth_timesync_enable(port_id);
     if (ret < 0) {
-        printf("Port %u: Hardware timesync enable failed (ret=%d, driver may not support)\n", port_id, ret);
+        printf("Port %u: rte_eth_timesync_enable() failed (ret=%d)\n", port_id, ret);
+        if (ret == -ENOTSUP || ret == -95) {
+            printf("  -> IEEE 1588 timesync not supported, but RX_OFFLOAD_TIMESTAMP may still work\n");
+        }
     } else {
-        printf("Port %u: Hardware timesync enabled successfully\n", port_id);
+        printf("Port %u: rte_eth_timesync_enable() SUCCESS\n", port_id);
+    }
+
+    // Test rte_eth_read_clock to verify NIC clock access
+    uint64_t test_clock = 0;
+    ret = rte_eth_read_clock(port_id, &test_clock);
+    if (ret == 0) {
+        printf("Port %u: rte_eth_read_clock() OK (clock=%lu)\n", port_id, (unsigned long)test_clock);
+    } else {
+        printf("Port %u: rte_eth_read_clock() FAILED (ret=%d)\n", port_id, ret);
     }
 #endif
 

@@ -6,459 +6,15 @@
 #include <rte_cycles.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
-#include <rte_mbuf_dyn.h>     // For hardware timestamp dynamic field
 #include <stdlib.h>
 #include <string.h>
 
-// PHC (PTP Hardware Clock) support for timestamp comparison
-#include <fcntl.h>
-#include <unistd.h>
-#include <time.h>
-#include <errno.h>
-
-// Macros for converting PHC fd to clockid_t
-#ifndef CLOCKFD
-#define CLOCKFD 3
-#endif
-#ifndef FD_TO_CLOCKID
-#define FD_TO_CLOCKID(fd) ((clockid_t) ((((unsigned int) ~(fd)) << 3) | CLOCKFD))
-#endif
-
 // ==========================================
-// HARDWARE TIMESTAMP SUPPORT (ConnectX-6 / mlx5)
+// LATENCY TEST - TSC ONLY MODE
 // ==========================================
-#if LATENCY_TEST_ENABLED
+// Hardware timestamp code removed - using TSC for timing
+// Real wire latency measured by separate kernel program (latency_test/)
 
-// Global variables for hardware timestamp
-static int g_timestamp_dynfield_offset = -1;
-static uint64_t g_timestamp_rx_dynflag = 0;
-static volatile bool g_hwts_enabled = false;
-
-// Clock offset calibration for multi-NIC setups
-// Each NIC has its own clock, we need to calibrate offsets
-static int64_t g_clock_offset[MAX_PORTS];  // Offset relative to port 0
-static bool g_clock_calibrated = false;
-
-/**
- * Calibrate clock offsets between different NICs
- * Uses paired reads (ref->port->ref) to minimize timing errors
- */
-static void calibrate_clock_offsets(uint16_t num_ports)
-{
-    printf("=== Calibrating NIC Clock Offsets ===\n");
-
-    memset(g_clock_offset, 0, sizeof(g_clock_offset));
-
-    // For each port, do paired reads: ref_before -> port -> ref_after
-    // The true offset is: port_clock - (ref_before + ref_after) / 2
-    // This compensates for the time spent reading
-    #define CALIBRATION_ROUNDS 10
-
-    printf("  Running %d calibration rounds per port...\n", CALIBRATION_ROUNDS);
-    printf("  Port 0 (reference): offset = 0\n");
-    g_clock_offset[0] = 0;
-
-    for (uint16_t port = 1; port < num_ports && port < MAX_PORTS; port++) {
-        int64_t total_offset = 0;
-        int valid_rounds = 0;
-
-        for (int round = 0; round < CALIBRATION_ROUNDS; round++) {
-            uint64_t ref_before = 0, port_clock = 0, ref_after = 0;
-
-            // Paired read: ref -> port -> ref
-            if (rte_eth_read_clock(0, &ref_before) != 0) continue;
-            if (rte_eth_read_clock(port, &port_clock) != 0) continue;
-            if (rte_eth_read_clock(0, &ref_after) != 0) continue;
-
-            // Calculate offset using midpoint of reference reads
-            int64_t ref_mid = (int64_t)(ref_before + ref_after) / 2;
-            int64_t offset = (int64_t)port_clock - ref_mid;
-
-            total_offset += offset;
-            valid_rounds++;
-        }
-
-        if (valid_rounds > 0) {
-            g_clock_offset[port] = total_offset / valid_rounds;
-            printf("  Port %u: offset = %+.3f ms\n",
-                   port, (double)g_clock_offset[port] / 1000000.0);
-        } else {
-            printf("  Port %u: calibration FAILED\n", port);
-        }
-    }
-
-    g_clock_calibrated = true;
-    printf("  Clock calibration complete\n\n");
-}
-
-/**
- * Get calibrated timestamp - applies offset correction
- */
-static inline int64_t get_calibrated_timestamp(uint64_t raw_timestamp, uint16_t port_id)
-{
-    if (!g_clock_calibrated || port_id >= MAX_PORTS) {
-        return (int64_t)raw_timestamp;
-    }
-    return (int64_t)raw_timestamp - g_clock_offset[port_id];
-}
-
-/**
- * Initialize hardware timestamp dynamic field
- * Must be called before starting latency test
- */
-static int init_hardware_timestamp(void)
-{
-    int ret = rte_mbuf_dyn_rx_timestamp_register(&g_timestamp_dynfield_offset, &g_timestamp_rx_dynflag);
-    if (ret != 0) {
-        printf("Hardware timestamp registration failed: %s\n", rte_strerror(-ret));
-        return -1;
-    }
-
-    printf("Hardware timestamp registered:\n");
-    printf("  Dynamic field offset: %d\n", g_timestamp_dynfield_offset);
-    printf("  RX dynflag: 0x%lx\n", g_timestamp_rx_dynflag);
-
-    g_hwts_enabled = true;
-    return 0;
-}
-
-/**
- * Read RX timestamp from mbuf dynamic field
- * Returns timestamp in nanoseconds, or 0 if not available
- */
-static inline uint64_t get_rx_hwts_ns(struct rte_mbuf *m)
-{
-    if (!g_hwts_enabled || g_timestamp_dynfield_offset < 0)
-        return 0;
-
-    // Check if timestamp flag is set
-    if (!(m->ol_flags & g_timestamp_rx_dynflag))
-        return 0;
-
-    // Read timestamp from dynamic field (nanoseconds)
-    rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-    return *ts_ptr;
-}
-
-/**
- * Read current NIC clock value for TX timestamp
- * Uses rte_eth_read_clock() - same clock source as RX timestamps
- */
-static inline uint64_t get_nic_clock(uint16_t port_id)
-{
-    uint64_t clock_value = 0;
-    int ret = rte_eth_read_clock(port_id, &clock_value);
-    if (ret != 0) {
-        return 0;  // Failed to read NIC clock
-    }
-    return clock_value;
-}
-
-// ==========================================
-// IEEE 1588 TIMESYNC SUPPORT (PTP-ADJUSTED)
-// ==========================================
-
-// Timesync mode: use PTP-adjusted timestamps
-static bool g_timesync_enabled = false;
-
-/**
- * Test and initialize IEEE 1588 timesync on all ports
- * Returns true if at least one port supports timesync
- */
-static bool init_timesync(uint16_t num_ports)
-{
-    printf("\n=== Testing IEEE 1588 Timesync API ===\n");
-
-    bool any_success = false;
-
-    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
-        printf("  Port %u:\n", port);
-
-        // Test 1: rte_eth_timesync_enable
-        int ret = rte_eth_timesync_enable(port);
-        printf("    rte_eth_timesync_enable(): %d (%s)\n",
-               ret, ret == 0 ? "OK" : rte_strerror(-ret));
-
-        // Test 2: rte_eth_timesync_read_time (PTP-adjusted time)
-        struct timespec ts;
-        ret = rte_eth_timesync_read_time(port, &ts);
-        printf("    rte_eth_timesync_read_time(): %d", ret);
-        if (ret == 0) {
-            printf(" -> %ld.%09ld\n", ts.tv_sec, ts.tv_nsec);
-            any_success = true;
-        } else {
-            printf(" (%s)\n", rte_strerror(-ret));
-        }
-
-        // Test 3: rte_eth_timesync_read_rx_timestamp
-        struct timespec rx_ts;
-        ret = rte_eth_timesync_read_rx_timestamp(port, &rx_ts, 0);
-        printf("    rte_eth_timesync_read_rx_timestamp(): %d", ret);
-        if (ret == 0) {
-            printf(" -> %ld.%09ld\n", rx_ts.tv_sec, rx_ts.tv_nsec);
-        } else {
-            printf(" (%s)\n", rte_strerror(-ret));
-        }
-
-        // Test 4: rte_eth_timesync_read_tx_timestamp
-        struct timespec tx_ts;
-        ret = rte_eth_timesync_read_tx_timestamp(port, &tx_ts);
-        printf("    rte_eth_timesync_read_tx_timestamp(): %d", ret);
-        if (ret == 0) {
-            printf(" -> %ld.%09ld\n", tx_ts.tv_sec, tx_ts.tv_nsec);
-        } else {
-            printf(" (%s)\n", rte_strerror(-ret));
-        }
-
-        // Test 5: Compare with rte_eth_read_clock
-        uint64_t raw_clock = 0;
-        ret = rte_eth_read_clock(port, &raw_clock);
-        printf("    rte_eth_read_clock(): %d", ret);
-        if (ret == 0) {
-            printf(" -> %lu (~%.3f sec)\n",
-                   (unsigned long)raw_clock, (double)raw_clock / 1e9);
-        } else {
-            printf(" (%s)\n", rte_strerror(-ret));
-        }
-
-        // If timesync_read_time works, show comparison
-        if (any_success && ret == 0) {
-            uint64_t timesync_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-            int64_t diff = (int64_t)timesync_ns - (int64_t)raw_clock;
-            printf("    Difference (timesync - raw): %+.3f sec\n", (double)diff / 1e9);
-        }
-    }
-
-    if (any_success) {
-        g_timesync_enabled = true;
-        printf("\n  IEEE 1588 Timesync: ENABLED (PTP-adjusted timestamps)\n");
-    } else {
-        printf("\n  IEEE 1588 Timesync: NOT AVAILABLE\n");
-    }
-
-    return any_success;
-}
-
-/**
- * Read PTP-adjusted time using IEEE 1588 timesync API
- * Returns time in nanoseconds, or 0 if failed
- */
-static inline uint64_t get_timesync_time_ns(uint16_t port_id)
-{
-    struct timespec ts;
-    if (rte_eth_timesync_read_time(port_id, &ts) != 0) {
-        return 0;
-    }
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-// ==========================================
-// PHC (PTP HARDWARE CLOCK) COMPARISON SUPPORT
-// ==========================================
-
-// PHC file descriptors per port (for reading PTP-adjusted time)
-static int g_phc_fd[MAX_PORTS] = {-1, -1, -1, -1, -1, -1, -1, -1};
-static bool g_phc_enabled = false;
-
-// Port to PTP device mapping for ConnectX-6 NICs
-// Typical mapping (may vary by system):
-//   Port 0,1 -> /dev/ptp6 (NIC 0)
-//   Port 2,3 -> /dev/ptp8 (NIC 1)
-//   Port 4,5 -> /dev/ptp10 (NIC 2)
-//   Port 6,7 -> /dev/ptp12 (NIC 3)
-static const char* port_to_ptp_device(uint16_t port_id) {
-    static const char* ptp_devices[] = {
-        "/dev/ptp6",  // Port 0
-        "/dev/ptp6",  // Port 1 (same NIC as port 0)
-        "/dev/ptp8",  // Port 2
-        "/dev/ptp8",  // Port 3 (same NIC as port 2)
-        "/dev/ptp10", // Port 4
-        "/dev/ptp10", // Port 5 (same NIC as port 4)
-        "/dev/ptp12", // Port 6
-        "/dev/ptp12"  // Port 7 (same NIC as port 6)
-    };
-    if (port_id < 8) {
-        return ptp_devices[port_id];
-    }
-    return "/dev/ptp0";
-}
-
-/**
- * Initialize PHC devices for all ports
- * Opens /dev/ptpX devices for reading PTP-adjusted timestamps
- */
-static void init_phc_devices(uint16_t num_ports)
-{
-    printf("\n=== Initializing PHC (PTP Hardware Clock) Devices ===\n");
-
-    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
-        const char* ptp_dev = port_to_ptp_device(port);
-
-        // Check if we already opened this PHC (same NIC)
-        if (port > 0 && strcmp(ptp_dev, port_to_ptp_device(port - 1)) == 0) {
-            g_phc_fd[port] = g_phc_fd[port - 1];
-            printf("  Port %u: Reusing PHC fd from port %u (%s)\n",
-                   port, port - 1, ptp_dev);
-            continue;
-        }
-
-        int fd = open(ptp_dev, O_RDONLY);
-        if (fd < 0) {
-            printf("  Port %u: Failed to open %s (errno=%d)\n", port, ptp_dev, errno);
-            g_phc_fd[port] = -1;
-        } else {
-            g_phc_fd[port] = fd;
-            printf("  Port %u: Opened %s (fd=%d)\n", port, ptp_dev, fd);
-        }
-    }
-
-    // Check if at least one PHC is available
-    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
-        if (g_phc_fd[port] >= 0) {
-            g_phc_enabled = true;
-            break;
-        }
-    }
-
-    if (g_phc_enabled) {
-        printf("  PHC comparison enabled\n");
-    } else {
-        printf("  WARNING: No PHC devices available, comparison disabled\n");
-    }
-    printf("\n");
-}
-
-/**
- * Read PTP-adjusted time from PHC for a specific port
- * Returns time in nanoseconds since epoch, or 0 if failed
- */
-static inline uint64_t get_phc_time_ns(uint16_t port_id)
-{
-    if (port_id >= MAX_PORTS || g_phc_fd[port_id] < 0) {
-        return 0;
-    }
-
-    struct timespec ts;
-    clockid_t clkid = FD_TO_CLOCKID(g_phc_fd[port_id]);
-
-    if (clock_gettime(clkid, &ts) != 0) {
-        return 0;
-    }
-
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-/**
- * Detailed PHC vs mbuf timestamp comparison
- * Prints comprehensive debug info to determine if mbuf timestamps are PTP-adjusted
- */
-static void compare_phc_and_mbuf_timestamp(uint16_t port_id, struct rte_mbuf *m,
-                                           uint64_t mbuf_ts, bool has_mbuf_ts)
-{
-    static uint32_t compare_count = 0;
-    if (compare_count >= 5) return;  // Only first 5 packets
-
-    printf("\n=== PHC vs mbuf Timestamp Comparison [Packet %u, Port %u] ===\n",
-           compare_count + 1, port_id);
-
-    // 1. Get PHC time (PTP-adjusted)
-    uint64_t phc_time_ns = get_phc_time_ns(port_id);
-
-    // 2. Get raw NIC clock
-    uint64_t nic_clock = 0;
-    rte_eth_read_clock(port_id, &nic_clock);
-
-    // 3. Print all timestamp sources
-    printf("  mbuf timestamp:\n");
-    if (has_mbuf_ts && mbuf_ts != 0) {
-        printf("    Value: %lu (~%.3f sec from some epoch)\n",
-               (unsigned long)mbuf_ts, (double)mbuf_ts / 1e9);
-        printf("    ol_flags: 0x%lx\n", (unsigned long)m->ol_flags);
-    } else {
-        printf("    NOT AVAILABLE (has=%d, value=%lu)\n", has_mbuf_ts, (unsigned long)mbuf_ts);
-    }
-
-    printf("  PHC time (PTP-adjusted):\n");
-    if (phc_time_ns != 0) {
-        time_t sec = phc_time_ns / 1000000000ULL;
-        struct tm *tm_info = localtime(&sec);
-        char time_str[64];
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
-        printf("    Value: %lu ns\n", (unsigned long)phc_time_ns);
-        printf("    Human: %s.%09lu\n", time_str, phc_time_ns % 1000000000ULL);
-    } else {
-        printf("    NOT AVAILABLE\n");
-    }
-
-    printf("  NIC raw clock (rte_eth_read_clock):\n");
-    printf("    Value: %lu (~%.3f sec from unknown epoch)\n",
-           (unsigned long)nic_clock, (double)nic_clock / 1e9);
-
-    // 4. Compare mbuf timestamp with both sources
-    if (has_mbuf_ts && mbuf_ts != 0) {
-        printf("  Analysis:\n");
-
-        // Check if mbuf_ts is close to PHC time (within 1 second)
-        int64_t diff_from_phc = (int64_t)mbuf_ts - (int64_t)phc_time_ns;
-        printf("    mbuf_ts - PHC time = %+.6f ms\n", (double)diff_from_phc / 1e6);
-
-        // Check if mbuf_ts is close to raw NIC clock
-        int64_t diff_from_nic = (int64_t)mbuf_ts - (int64_t)nic_clock;
-        printf("    mbuf_ts - NIC clock = %+.6f ms\n", (double)diff_from_nic / 1e6);
-
-        // Determine if mbuf timestamp is PTP-adjusted or raw
-        if (phc_time_ns != 0) {
-            double abs_diff_phc = (diff_from_phc > 0) ? diff_from_phc : -diff_from_phc;
-            double abs_diff_nic = (diff_from_nic > 0) ? diff_from_nic : -diff_from_nic;
-
-            if (abs_diff_phc < 1e9) {  // Within 1 second of PHC
-                printf("    CONCLUSION: mbuf timestamp appears to be PTP-ADJUSTED!\n");
-                printf("                (close to PHC time, diff=%.3f ms)\n", (double)diff_from_phc / 1e6);
-            } else if (abs_diff_nic < 1e9) {  // Within 1 second of raw NIC clock
-                printf("    CONCLUSION: mbuf timestamp appears to be RAW NIC COUNTER\n");
-                printf("                (close to raw NIC clock, diff=%.3f ms)\n", (double)diff_from_nic / 1e6);
-            } else {
-                printf("    CONCLUSION: UNCLEAR - neither close to PHC nor raw NIC clock\n");
-                printf("                PHC diff = %.3f sec, NIC diff = %.3f sec\n",
-                       (double)diff_from_phc / 1e9, (double)diff_from_nic / 1e9);
-            }
-        }
-    }
-
-    printf("=========================================================\n\n");
-    compare_count++;
-}
-
-/**
- * Close PHC file descriptors
- */
-static void cleanup_phc_devices(void)
-{
-    int closed_count = 0;
-    for (int port = 0; port < MAX_PORTS; port++) {
-        if (g_phc_fd[port] >= 0) {
-            // Don't close if same fd was used by previous port
-            bool already_closed = false;
-            for (int p = 0; p < port; p++) {
-                if (g_phc_fd[p] == g_phc_fd[port]) {
-                    already_closed = true;
-                    break;
-                }
-            }
-            if (!already_closed) {
-                close(g_phc_fd[port]);
-                closed_count++;
-            }
-            g_phc_fd[port] = -1;
-        }
-    }
-    if (closed_count > 0) {
-        printf("Closed %d PHC device(s)\n", closed_count);
-    }
-    g_phc_enabled = false;
-}
-
-#endif /* LATENCY_TEST_ENABLED */
 
 // ==========================================
 // GLOBAL VARIABLES
@@ -1067,20 +623,6 @@ int init_port_txrx(uint16_t port_id, struct txrx_config *config)
 
     port_conf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
 
-#if LATENCY_TEST_ENABLED
-    // Hardware Timestamp Debug
-    printf("Port %u: Hardware Timestamp Capability Check:\n", port_id);
-    printf("  rx_offload_capa: 0x%016lx\n", (unsigned long)dev_info.rx_offload_capa);
-    printf("  TIMESTAMP flag:  0x%016lx\n", (unsigned long)RTE_ETH_RX_OFFLOAD_TIMESTAMP);
-
-    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
-        port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
-        printf("  -> SUPPORTED and ENABLED\n");
-    } else {
-        printf("  -> NOT SUPPORTED by driver\n");
-    }
-#endif
-
     ret = rte_eth_dev_configure(
         port_id,
         config->nb_rx_queues,
@@ -1127,22 +669,6 @@ int init_port_txrx(uint16_t port_id, struct txrx_config *config)
         printf("Error starting port %u\n", port_id);
         return ret;
     }
-
-#if LATENCY_TEST_ENABLED
-    // Enable IEEE 1588 timesync after port start
-    ret = rte_eth_timesync_enable(port_id);
-    if (ret == 0) {
-        printf("Port %u: rte_eth_timesync_enable() SUCCESS\n", port_id);
-    } else {
-        printf("Port %u: rte_eth_timesync_enable() failed (ret=%d) - may still work with RX_OFFLOAD_TIMESTAMP\n", port_id, ret);
-    }
-
-    // Test NIC clock access
-    uint64_t test_clock = 0;
-    ret = rte_eth_read_clock(port_id, &test_clock);
-    printf("Port %u: rte_eth_read_clock() %s (clock=%lu)\n",
-           port_id, ret == 0 ? "OK" : "FAILED", (unsigned long)test_clock);
-#endif
 
     if (config->nb_rx_queues > 1)
     {
@@ -2549,18 +2075,8 @@ static int latency_tx_worker(void *arg)
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-                // Get TX timestamp AFTER sending for accuracy
-                if (g_timesync_enabled) {
-                    // IEEE 1588 timesync - PTP-adjusted timestamp
-                    uint64_t ts = get_timesync_time_ns(port_id);
-                    result->tx_timestamp = (ts != 0) ? ts : rte_rdtsc();
-                } else if (g_hwts_enabled) {
-                    // Raw NIC clock (requires calibration)
-                    uint64_t tx_nic_clock = get_nic_clock(port_id);
-                    result->tx_timestamp = (tx_nic_clock != 0) ? tx_nic_clock : rte_rdtsc();
-                } else {
-                    result->tx_timestamp = rte_rdtsc();
-                }
+                // Get TX timestamp using TSC
+                result->tx_timestamp = rte_rdtsc();
             }
 
             // Small delay between packets in same VLAN
@@ -2599,9 +2115,6 @@ static int latency_rx_worker(void *arg)
     const uint32_t payload_offset = l2_len + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
     uint32_t total_received = 0;
-    uint32_t mbuf_ts_count = 0;      // Count of packets with mbuf hardware timestamp
-    uint32_t nic_clock_count = 0;    // Count of packets using NIC clock fallback
-    uint32_t tsc_count = 0;          // Count of packets using TSC fallback
 
     struct rte_mbuf *pkts[BURST_SIZE];
     uint64_t timeout_cycles = g_latency_test.tsc_hz * LATENCY_TEST_TIMEOUT_SEC;
@@ -2639,139 +2152,22 @@ static int latency_rx_worker(void *arg)
             uint8_t *pkt_data = pkt;
             uint16_t vl_id = ((uint16_t)pkt_data[4] << 8) | pkt_data[5];
 
-            // Get RX timestamp
-            uint64_t rx_timestamp = 0;
-            bool hw_ts_valid = false;
-            bool mbuf_ts_found = false;
-            bool using_timesync = false;
-
-            // Option 1: IEEE 1588 Timesync (PTP-adjusted)
-            if (g_timesync_enabled) {
-                rx_timestamp = get_timesync_time_ns(port_id);
-                if (rx_timestamp != 0) {
-                    hw_ts_valid = true;
-                    using_timesync = true;
-                    mbuf_ts_count++;  // Count as successful HW timestamp
-                }
-            }
-
-            // Option 2: Hardware timestamp from mbuf (raw NIC clock)
-            if (!hw_ts_valid && g_hwts_enabled) {
-                // Debug: Print first few packets' ol_flags info
-                static uint32_t debug_count = 0;
-                if (debug_count < 3) {
-                    printf("  DEBUG RX Port %u:\n", port_id);
-                    printf("    ol_flags = 0x%lx\n", (unsigned long)m->ol_flags);
-                    printf("    dynflag  = 0x%lx (has=%d)\n",
-                           (unsigned long)g_timestamp_rx_dynflag,
-                           (m->ol_flags & g_timestamp_rx_dynflag) ? 1 : 0);
-
-                    // Check IEEE1588 flag directly
-                    #ifdef RTE_MBUF_F_RX_IEEE1588_TMSTMP
-                    printf("    IEEE1588 = 0x%lx (has=%d)\n",
-                           (unsigned long)RTE_MBUF_F_RX_IEEE1588_TMSTMP,
-                           (m->ol_flags & RTE_MBUF_F_RX_IEEE1588_TMSTMP) ? 1 : 0);
-                    #else
-                    printf("    IEEE1588 flag not defined\n");
-                    #endif
-
-                    // Check dynamic field timestamp
-                    if (g_timestamp_dynfield_offset >= 0) {
-                        rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-                        printf("    dynfield[%d] = %lu\n", g_timestamp_dynfield_offset, (unsigned long)*ts_ptr);
-                    }
-
-                    debug_count++;
-                }
-
-                // Check if hardware timestamp flag is set (dynamic flag or IEEE1588)
-                bool has_hw_ts_flag = (m->ol_flags & g_timestamp_rx_dynflag) != 0;
-                #ifdef RTE_MBUF_F_RX_IEEE1588_TMSTMP
-                has_hw_ts_flag = has_hw_ts_flag || ((m->ol_flags & RTE_MBUF_F_RX_IEEE1588_TMSTMP) != 0);
-                #endif
-
-                if (has_hw_ts_flag && g_timestamp_dynfield_offset >= 0) {
-                    rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-                    rx_timestamp = *ts_ptr;
-                    hw_ts_valid = (rx_timestamp != 0);
-                    mbuf_ts_found = true;
-                    if (hw_ts_valid) {
-                        mbuf_ts_count++;
-                    }
-                }
-
-                // PHC vs mbuf timestamp comparison (first 5 packets)
-                if (g_phc_enabled) {
-                    uint64_t mbuf_ts_for_compare = 0;
-                    if (g_timestamp_dynfield_offset >= 0) {
-                        rte_mbuf_timestamp_t *ts_ptr = RTE_MBUF_DYNFIELD(m, g_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-                        mbuf_ts_for_compare = *ts_ptr;
-                    }
-                    compare_phc_and_mbuf_timestamp(port_id, m, mbuf_ts_for_compare, has_hw_ts_flag);
-                }
-
-                // Fallback to NIC clock if no hardware timestamp in mbuf
-                if (!hw_ts_valid) {
-                    rx_timestamp = get_nic_clock(port_id);
-                    if (rx_timestamp != 0) {
-                        hw_ts_valid = true;
-                        nic_clock_count++;
-                    }
-                }
-            }
-
-            // Final fallback to TSC if nothing else worked
-            if (!hw_ts_valid) {
-                rx_timestamp = rte_rdtsc();
-                tsc_count++;
-            }
+            // Get RX timestamp using TSC
+            uint64_t rx_timestamp = rte_rdtsc();
 
             // Find matching result and calculate latency
             for (uint16_t r = 0; r < g_latency_test.ports[src_port_id].test_count; r++) {
                 struct latency_result *result = &g_latency_test.ports[src_port_id].results[r];
 
                 if (result->vl_id == vl_id && result->tx_timestamp != 0) {
-                    double latency_us;
+                    // Calculate latency using TSC
+                    int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
+                    double latency_us = (double)delta * 1000000.0 / g_latency_test.tsc_hz;
 
-                    if (using_timesync && g_timesync_enabled) {
-                        // IEEE 1588 Timesync - PTP-adjusted timestamps
-                        // No calibration needed - all NICs synchronized via PTP
-                        int64_t delta = (int64_t)rx_timestamp - (int64_t)result->tx_timestamp;
-                        // Timesync returns nanoseconds
-                        latency_us = (double)delta / 1000.0;
-                    } else if (hw_ts_valid && g_hwts_enabled) {
-                        // Raw NIC clock with offset calibration
-                        // TX timestamp is from src_port_id, RX timestamp is from port_id
-                        // Apply offset correction to compensate for different NIC clocks
-                        int64_t calibrated_tx = get_calibrated_timestamp(result->tx_timestamp, src_port_id);
-                        int64_t calibrated_rx = get_calibrated_timestamp(rx_timestamp, port_id);
-                        int64_t delta = calibrated_rx - calibrated_tx;
-
-                        // NIC clock is ~1 GHz, so delta is in nanoseconds
-                        latency_us = (double)delta / 1000.0;
-                    } else {
-                        // Software TSC fallback (no calibration needed - same clock source)
-                        int64_t delta = (int64_t)(rx_timestamp - result->tx_timestamp);
-                        latency_us = (double)delta * 1000000.0 / g_latency_test.tsc_hz;
-                    }
-
-                    // Sanity check - allow small negative values due to calibration timing errors
-                    // Calibration reads clocks sequentially, introducing small errors (~1-10ms)
-                    if (latency_us < -1000.0 || latency_us > 1000000.0) {
-                        // Debug: print rejected values
-                        static uint32_t reject_count = 0;
-                        if (reject_count < 10) {
-                            printf("  [LATENCY REJECTED] Port %u->%u VL %u: %.2f us (out of range)\n",
-                                   src_port_id, port_id, vl_id, latency_us);
-                            reject_count++;
-                        }
+                    // Sanity check
+                    if (latency_us < 0 || latency_us > 1000000.0) {
                         rte_pktmbuf_free(m);
                         continue;
-                    }
-
-                    // Clamp small negative values to 0 (calibration error)
-                    if (latency_us < 0) {
-                        latency_us = 0.0;
                     }
 
                     result->rx_count++;
@@ -2806,8 +2202,7 @@ static int latency_rx_worker(void *arg)
     }
 
     g_latency_test.ports[port_id].rx_complete = true;
-    printf("Latency RX Worker completed: Port %u (%u packets) [TS: mbuf=%u, nic_clock=%u, tsc=%u]\n",
-           port_id, total_received, mbuf_ts_count, nic_clock_count, tsc_count);
+    printf("Latency RX Worker completed: Port %u (%u packets)\n", port_id, total_received);
     return 0;
 }
 
@@ -2816,18 +2211,9 @@ static int latency_rx_worker(void *arg)
  */
 void print_latency_results(void)
 {
-    const char *ts_mode;
-    if (g_timesync_enabled) {
-        ts_mode = "IEEE 1588 PTP";
-    } else if (g_hwts_enabled) {
-        ts_mode = "HARDWARE NIC (calibrated)";
-    } else {
-        ts_mode = "SOFTWARE TSC";
-    }
-
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║         LATENCY TEST SONUCLARI (Timestamp: %-30s)       ║\n", ts_mode);
+    printf("║         LATENCY TEST SONUCLARI (Timestamp: SOFTWARE TSC)                                 ║\n");
     printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
     printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  RX/TX   ║\n");
     printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
@@ -2895,59 +2281,12 @@ int start_latency_test(struct ports_config *ports_config, volatile bool *stop_fl
     g_latency_test.test_start_time = rte_rdtsc();
 
     // ==========================================
-    // Initialize Hardware Timestamps (ConnectX-6 / mlx5)
+    // Timestamp Mode: Software TSC
     // ==========================================
-    printf("=== Initializing Hardware Timestamps ===\n");
-    if (init_hardware_timestamp() == 0) {
-        printf("Hardware timestamp dynamic field registered\n");
-
-        // Test rte_eth_read_clock() on first valid port
-        for (uint16_t i = 0; i < ports_config->nb_ports; i++) {
-            if (!ports_config->ports[i].is_valid) continue;
-            uint16_t port_id = ports_config->ports[i].port_id;
-
-            uint64_t clock1 = 0, clock2 = 0;
-            int ret1 = rte_eth_read_clock(port_id, &clock1);
-            rte_delay_us(1000);  // 1ms delay
-            int ret2 = rte_eth_read_clock(port_id, &clock2);
-
-            if (ret1 == 0 && ret2 == 0) {
-                uint64_t clock_diff = clock2 - clock1;
-                // Estimate clock frequency (should be ~1GHz for mlx5)
-                double clock_freq_mhz = (double)clock_diff / 1000.0;  // cycles per ms -> MHz
-                printf("  Port %u: rte_eth_read_clock() OK\n", port_id);
-                printf("    Clock diff in 1ms: %lu cycles (~%.1f MHz)\n", clock_diff, clock_freq_mhz);
-            } else {
-                printf("  Port %u: rte_eth_read_clock() FAILED (ret=%d)\n", port_id, ret1);
-                g_hwts_enabled = false;
-            }
-            break;  // Only test first port
-        }
-
-        if (g_hwts_enabled) {
-            printf("Hardware timestamp support: ENABLED\n");
-            printf("  TX: rte_eth_read_clock() for NIC clock\n");
-            printf("  RX: mbuf dynamic field timestamp\n");
-
-            // Try IEEE 1588 timesync first (PTP-adjusted timestamps)
-            bool timesync_ok = init_timesync(ports_config->nb_ports);
-
-            if (timesync_ok) {
-                // Timesync provides PTP-adjusted time, no calibration needed
-                printf("\n  Using IEEE 1588 timesync for PTP-adjusted timestamps\n");
-                printf("  Calibration: SKIPPED (PTP handles synchronization)\n");
-            } else {
-                // Fallback to raw clock with calibration
-                printf("\n  Timesync not available, using raw clock with calibration\n");
-                calibrate_clock_offsets(ports_config->nb_ports);
-            }
-
-            // Initialize PHC devices for comparison/debugging
-            init_phc_devices(ports_config->nb_ports);
-        }
-    } else {
-        printf("Hardware timestamp support: DISABLED (using software TSC)\n");
-    }
+    printf("=== Timestamp Mode ===\n");
+    printf("  Using SOFTWARE TSC for latency measurement\n");
+    printf("  TSC frequency: %lu Hz\n", g_latency_test.tsc_hz);
+    printf("  Note: For true wire latency, use latency_test/wire_latency_test\n");
     printf("\n");
 
     // ==========================================

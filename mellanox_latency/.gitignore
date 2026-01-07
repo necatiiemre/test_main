@@ -1,0 +1,9 @@
+# Build outputs
+obj/
+mellanox_latency
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/

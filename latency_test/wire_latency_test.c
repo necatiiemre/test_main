@@ -141,20 +141,25 @@ static const uint16_t vlan_ids[NUM_PORTS][VLANS_PER_PORT] = {
     {101, 102, 103, 104},  // Port 3
 };
 
-// VL-IDs per port (from config.h tx_vl_ids)
-// These are the START values for each queue's VL-ID range
-static const uint16_t vl_ids[NUM_PORTS][VLANS_PER_PORT] = {
-    {1027, 1155, 1283, 1411},  // Port 0
-    {1539, 1667, 1795, 1923},  // Port 1
-    {3,    131,  259,  387},   // Port 2
-    {515,  643,  771,  899},   // Port 3
-};
+// VL-ID calculation from VLAN:
+// VL-ID = (VLAN - 97) * 128 + 3
+// Examples:
+//   VLAN 97  -> VL-ID 3
+//   VLAN 98  -> VL-ID 131
+//   VLAN 99  -> VL-ID 259
+//   VLAN 100 -> VL-ID 387
+//   VLAN 101 -> VL-ID 515
+//   VLAN 105 -> VL-ID 1027
+//   VLAN 109 -> VL-ID 1539
+static uint16_t vlan_to_vl_id(uint16_t vlan_id) {
+    return (uint16_t)((vlan_id - 97) * 128 + 3);
+}
 
-// Get VL-ID from table
+// Get VL-ID for a specific port and vlan index
 static uint16_t get_vl_id(int port_id, int vlan_index) {
     if (port_id < 0 || port_id >= NUM_PORTS) return 0;
     if (vlan_index < 0 || vlan_index >= VLANS_PER_PORT) return 0;
-    return vl_ids[port_id][vlan_index];
+    return vlan_to_vl_id(vlan_ids[port_id][vlan_index]);
 }
 
 #define PACKET_SIZE     1500

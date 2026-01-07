@@ -2471,12 +2471,13 @@ static int build_latency_test_packet(struct rte_mbuf *mbuf,
 }
 
 /**
- * Build PTP (IEEE1588) latency test packet
- * Format: [ETH type=0x88F7][PTP SYNC Header][Custom payload with VL-ID]
+ * Build PTP (IEEE1588) latency test packet with VLAN support
+ * Format: [ETH][VLAN][PTP SYNC Header][Custom payload with VL-ID]
  * This format should trigger hardware IEEE1588 timestamping
  */
 static int build_ptp_latency_test_packet(struct rte_mbuf *mbuf,
                                           uint16_t port_id,
+                                          uint16_t vlan_id,
                                           uint16_t vl_id,
                                           uint64_t sequence)
 {
@@ -2504,13 +2505,30 @@ static int build_ptp_latency_test_packet(struct rte_mbuf *mbuf,
     eth->src_addr.addr_bytes[4] = 0x00;
     eth->src_addr.addr_bytes[5] = (uint8_t)port_id;
 
-    // PTP Ethertype
+#if VLAN_ENABLED
+    // VLAN tagged frame
+    eth->ether_type = rte_cpu_to_be_16(0x8100);  // VLAN tag
+
+    // ==========================================
+    // VLAN HEADER (4 bytes)
+    // ==========================================
+    struct vlan_hdr *vlan = (struct vlan_hdr *)(pkt + sizeof(struct rte_ether_hdr));
+    vlan->tci = rte_cpu_to_be_16(vlan_id);
+    vlan->eth_proto = rte_cpu_to_be_16(RTE_ETHER_TYPE_PTP);  // Inner type = PTP
+
+    const uint16_t l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
+#else
+    // No VLAN - direct PTP Ethertype
+    (void)vlan_id;  // Suppress unused warning
     eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_PTP);
+
+    const uint16_t l2_len = sizeof(struct rte_ether_hdr);
+#endif
 
     // ==========================================
     // PTP HEADER (34 bytes for SYNC)
     // ==========================================
-    struct ptp_header *ptp = (struct ptp_header *)(pkt + sizeof(struct rte_ether_hdr));
+    struct ptp_header *ptp = (struct ptp_header *)(pkt + l2_len);
 
     // Message type: SYNC (0x00)
     // Transport specific: 0x0 (IEEE 802.3)
@@ -2561,7 +2579,7 @@ static int build_ptp_latency_test_packet(struct rte_mbuf *mbuf,
     // CUSTOM PAYLOAD AFTER PTP HEADER
     // Encode VL-ID and sequence for our matching logic
     // ==========================================
-    uint8_t *payload = pkt + sizeof(struct rte_ether_hdr) + sizeof(struct ptp_header);
+    uint8_t *payload = pkt + l2_len + sizeof(struct ptp_header);
 
     // VL-ID (2 bytes)
     *(uint16_t *)payload = rte_cpu_to_be_16(vl_id);
@@ -2569,8 +2587,8 @@ static int build_ptp_latency_test_packet(struct rte_mbuf *mbuf,
     // Sequence (8 bytes)
     *(uint64_t *)(payload + 2) = sequence;
 
-    // Set packet length (ETH + PTP header + custom payload)
-    uint16_t pkt_len = sizeof(struct rte_ether_hdr) + sizeof(struct ptp_header) + 10;
+    // Set packet length (L2 + PTP header + custom payload)
+    uint16_t pkt_len = l2_len + sizeof(struct ptp_header) + 10;
 
     // Pad to minimum Ethernet frame size (64 bytes)
     if (pkt_len < 64) {
@@ -2695,7 +2713,7 @@ static int latency_tx_worker(void *arg)
             // Build packet with sequence number = p (timestamp will be set below)
             if (g_ptp_packet_mode) {
                 // EXPERIMENTAL: Use PTP packet format for IEEE1588 timestamping
-                build_ptp_latency_test_packet(mbuf, port_id, vl_id, p);
+                build_ptp_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p);
             } else {
                 build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
             }
@@ -2807,7 +2825,25 @@ static int latency_rx_worker(void *arg)
             struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
 
             // Check if this is a PTP packet (EtherType 0x88F7)
-            bool is_ptp_packet = (rte_be_to_cpu_16(eth->ether_type) == RTE_ETHER_TYPE_PTP);
+            // Handle both VLAN-tagged and non-VLAN cases
+            bool is_ptp_packet = false;
+            uint16_t ptp_l2_len = sizeof(struct rte_ether_hdr);
+
+#if VLAN_ENABLED
+            // With VLAN: outer type = 0x8100, inner type = 0x88F7
+            if (rte_be_to_cpu_16(eth->ether_type) == 0x8100) {
+                struct vlan_hdr *vlan = (struct vlan_hdr *)(pkt + sizeof(struct rte_ether_hdr));
+                if (rte_be_to_cpu_16(vlan->eth_proto) == RTE_ETHER_TYPE_PTP) {
+                    is_ptp_packet = true;
+                    ptp_l2_len = sizeof(struct rte_ether_hdr) + sizeof(struct vlan_hdr);
+                }
+            }
+#else
+            // Without VLAN: direct PTP EtherType
+            if (rte_be_to_cpu_16(eth->ether_type) == RTE_ETHER_TYPE_PTP) {
+                is_ptp_packet = true;
+            }
+#endif
 
             uint16_t vl_id;
             if (is_ptp_packet && g_ptp_packet_mode) {
@@ -2818,7 +2854,14 @@ static int latency_rx_worker(void *arg)
                 static uint32_t ptp_debug_count = 0;
                 if (ptp_debug_count < 5) {
                     printf("  [PTP RX] Port %u: Received PTP packet!\n", port_id);
+#if VLAN_ENABLED
+                    struct vlan_hdr *dbg_vlan = (struct vlan_hdr *)(pkt + sizeof(struct rte_ether_hdr));
+                    printf("    VLAN ID: %u, Inner EtherType: 0x%04x (PTP)\n",
+                           rte_be_to_cpu_16(dbg_vlan->tci) & 0xFFF,
+                           rte_be_to_cpu_16(dbg_vlan->eth_proto));
+#else
                     printf("    EtherType: 0x%04x\n", rte_be_to_cpu_16(eth->ether_type));
+#endif
                     printf("    ol_flags: 0x%lx\n", (unsigned long)m->ol_flags);
 
                     // Check IEEE1588 flags

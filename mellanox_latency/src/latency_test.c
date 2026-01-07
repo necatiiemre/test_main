@@ -3,10 +3,11 @@
  * @brief Mellanox HW Timestamp Latency Test - Test Logic Implementation
  *
  * Ana test mantığı:
- * - Her port çifti için soket aç
- * - Her VLAN için N paket gönder/al
+ * - Her port çifti için soket aç (bir kez)
+ * - Her VLAN için paket gönder/al
  * - VLAN testleri arasında 32µs bekle
  * - Latency hesapla
+ * - Soketleri kapat
  */
 
 #include <stdio.h>
@@ -23,17 +24,6 @@
 
 // Interrupt flag (defined in main.c)
 extern volatile int g_interrupted;
-
-// ============================================
-// INTERNAL STRUCTURES
-// ============================================
-
-// TX timestamp kaydı (paket gönderildiğinde)
-struct tx_record {
-    uint64_t seq_num;
-    uint64_t tx_timestamp;
-    bool     used;
-};
 
 // ============================================
 // CHECK INTERFACES
@@ -72,75 +62,36 @@ int check_all_interfaces(void) {
 }
 
 // ============================================
-// SINGLE VLAN TEST
+// SINGLE VLAN TEST (with pre-opened sockets)
 // ============================================
 
-int run_vlan_test(const struct port_pair *pair,
-                  int vlan_idx,
-                  const struct test_config *config,
-                  struct latency_result *result) {
-
-    uint16_t vlan_id = pair->vlans[vlan_idx];
-    uint16_t vl_id = pair->vl_ids[vlan_idx];
-
+static int run_single_vlan_test(
+    struct hw_socket *tx_sock,
+    struct hw_socket *rx_sock,
+    uint16_t tx_port,
+    uint16_t rx_port,
+    uint16_t vlan_id,
+    uint16_t vl_id,
+    const struct test_config *config,
+    struct latency_result *result)
+{
     // Initialize result
     memset(result, 0, sizeof(*result));
-    result->tx_port = pair->tx_port;
-    result->rx_port = pair->rx_port;
+    result->tx_port = tx_port;
+    result->rx_port = rx_port;
     result->vlan_id = vlan_id;
     result->vl_id = vl_id;
     result->min_latency_ns = UINT64_MAX;
     result->valid = false;
 
-    LOG_DEBUG("Testing VLAN %u (VL-ID %u): Port %d (%s) -> Port %d (%s)",
-             vlan_id, vl_id,
-             pair->tx_port, pair->tx_iface,
-             pair->rx_port, pair->rx_iface);
-
-    // Create sockets
-    struct hw_socket tx_sock, rx_sock;
-
-    int ret = create_hw_timestamp_socket(pair->tx_iface, SOCK_TYPE_TX, &tx_sock);
-    if (ret < 0) {
-        snprintf(result->error_msg, sizeof(result->error_msg),
-                "TX socket failed: %d", ret);
-        LOG_ERROR("Failed to create TX socket for %s: %d", pair->tx_iface, ret);
-        return -1;
-    }
-
-    ret = create_hw_timestamp_socket(pair->rx_iface, SOCK_TYPE_RX, &rx_sock);
-    if (ret < 0) {
-        snprintf(result->error_msg, sizeof(result->error_msg),
-                "RX socket failed: %d", ret);
-        LOG_ERROR("Failed to create RX socket for %s: %d", pair->rx_iface, ret);
-        close_hw_timestamp_socket(&tx_sock);
-        return -2;
-    }
-
-    // Allocate TX records
-    struct tx_record *tx_records = calloc(config->packet_count, sizeof(struct tx_record));
-    if (!tx_records) {
-        LOG_ERROR("Failed to allocate TX records");
-        close_hw_timestamp_socket(&tx_sock);
-        close_hw_timestamp_socket(&rx_sock);
-        return -3;
-    }
+    LOG_DEBUG("Testing VLAN %u (VL-ID %u): Port %d -> Port %d",
+             vlan_id, vl_id, tx_port, rx_port);
 
     // Packet buffer
-    uint8_t *pkt_buf = malloc(config->packet_size);
-    if (!pkt_buf) {
-        LOG_ERROR("Failed to allocate packet buffer");
-        free(tx_records);
-        close_hw_timestamp_socket(&tx_sock);
-        close_hw_timestamp_socket(&rx_sock);
-        return -4;
-    }
+    uint8_t pkt_buf[2048];
+    uint8_t rx_buf[2048];
 
-    // =========================================
-    // PHASE 1: Send all packets for this VLAN
-    // =========================================
-    LOG_DEBUG("Sending %d packets for VLAN %u...", config->packet_count, vlan_id);
-
+    // Send packets one by one and receive response
     for (int pkt = 0; pkt < config->packet_count && !g_interrupted; pkt++) {
         uint64_t seq_num = (uint64_t)vlan_id << 32 | (uint64_t)pkt;
 
@@ -154,119 +105,99 @@ int run_vlan_test(const struct port_pair *pair,
 
         // Send and get TX timestamp
         uint64_t tx_ts = 0;
-        ret = send_packet_get_tx_timestamp(&tx_sock, pkt_buf, pkt_len, &tx_ts);
-
-        if (ret == 0 && tx_ts > 0) {
-            tx_records[pkt].seq_num = seq_num;
-            tx_records[pkt].tx_timestamp = tx_ts;
-            tx_records[pkt].used = true;
-            result->tx_count++;
-
-            LOG_TRACE("TX[%d]: seq=%lu, ts=%lu ns", pkt, seq_num, tx_ts);
-        } else {
-            LOG_WARN("TX[%d]: Failed to get timestamp (ret=%d, ts=%lu)",
-                    pkt, ret, tx_ts);
-            result->tx_count++;  // Paket gönderildi ama timestamp alınamadı
-        }
-
-        // NOT: Paketler arası bekleme yok, sadece VLAN testleri arasında bekleme var
-    }
-
-    LOG_DEBUG("Sent %u packets, waiting for responses...", result->tx_count);
-
-    // =========================================
-    // PHASE 2: Receive packets and match
-    // =========================================
-    uint8_t *rx_buf = malloc(config->packet_size + 64);
-    if (!rx_buf) {
-        LOG_ERROR("Failed to allocate RX buffer");
-        free(pkt_buf);
-        free(tx_records);
-        close_hw_timestamp_socket(&tx_sock);
-        close_hw_timestamp_socket(&rx_sock);
-        return -5;
-    }
-
-    int remaining_timeout = config->timeout_ms;
-    uint64_t start_time = get_time_ns();
-
-    while (remaining_timeout > 0 && result->rx_count < result->tx_count && !g_interrupted) {
-        size_t rx_len = config->packet_size + 64;
-        uint64_t rx_ts = 0;
-
-        ret = recv_packet_get_rx_timestamp(&rx_sock, rx_buf, &rx_len, &rx_ts, 100);
-
-        if (ret == -1) {
-            // Timeout, update remaining
-            uint64_t elapsed_ms = (get_time_ns() - start_time) / 1000000;
-            remaining_timeout = config->timeout_ms - (int)elapsed_ms;
-            continue;
-        }
-
-        if (ret == -10) {
-            // Interrupted by signal, exit gracefully
-            break;
-        }
+        int ret = send_packet_get_tx_timestamp(tx_sock, pkt_buf, pkt_len, &tx_ts);
 
         if (ret < 0) {
-            LOG_WARN("RX error: %d", ret);
+            if (ret == -10) {
+                LOG_DEBUG("TX interrupted");
+                break;
+            }
+            LOG_WARN("TX[%d]: Failed to send/get timestamp (ret=%d)", pkt, ret);
+            result->tx_count++;
             continue;
         }
 
-        // Check if this is our packet
-        if (!is_our_test_packet(rx_buf, rx_len, vlan_id, vl_id)) {
-            LOG_TRACE("Received non-matching packet, skipping");
-            continue;
-        }
+        result->tx_count++;
+        LOG_TRACE("TX[%d]: seq=%lu, ts=%lu ns", pkt, seq_num, tx_ts);
 
-        // Extract sequence number
-        uint64_t rx_seq = extract_seq_num(rx_buf, rx_len);
+        // Now wait for RX packet
+        uint64_t start_time = get_time_ns();
+        int remaining_timeout = config->timeout_ms;
+        bool received = false;
 
-        LOG_TRACE("RX: seq=%lu, ts=%lu ns, len=%zu", rx_seq, rx_ts, rx_len);
+        while (remaining_timeout > 0 && !received && !g_interrupted) {
+            size_t rx_len = sizeof(rx_buf);
+            uint64_t rx_ts = 0;
 
-        // Find matching TX record
-        bool matched = false;
-        for (int i = 0; i < config->packet_count; i++) {
-            if (tx_records[i].used && tx_records[i].seq_num == rx_seq) {
-                // Calculate latency
-                if (rx_ts > 0 && tx_records[i].tx_timestamp > 0) {
-                    uint64_t latency = rx_ts - tx_records[i].tx_timestamp;
+            ret = recv_packet_get_rx_timestamp(rx_sock, rx_buf, &rx_len, &rx_ts,
+                                               MIN(100, remaining_timeout));
 
-                    result->total_latency_ns += latency;
-                    if (latency < result->min_latency_ns) {
-                        result->min_latency_ns = latency;
-                    }
-                    if (latency > result->max_latency_ns) {
-                        result->max_latency_ns = latency;
-                    }
+            if (ret == -1) {
+                // Timeout, check remaining
+                uint64_t elapsed_ms = (get_time_ns() - start_time) / 1000000;
+                remaining_timeout = config->timeout_ms - (int)elapsed_ms;
+                continue;
+            }
 
-                    LOG_DEBUG("Latency[%d]: %lu ns (%.2f us)",
-                             i, latency, ns_to_us(latency));
+            if (ret == -10) {
+                LOG_DEBUG("RX interrupted");
+                break;
+            }
+
+            if (ret < 0) {
+                LOG_TRACE("RX error: %d", ret);
+                continue;
+            }
+
+            // Check if this is our packet
+            if (!is_our_test_packet(rx_buf, rx_len, vlan_id, vl_id)) {
+                LOG_TRACE("Received non-matching packet (len=%zu), skipping", rx_len);
+                continue;
+            }
+
+            // Extract sequence number
+            uint64_t rx_seq = extract_seq_num(rx_buf, rx_len);
+
+            if (rx_seq != seq_num) {
+                LOG_TRACE("Sequence mismatch: expected=%lu, got=%lu", seq_num, rx_seq);
+                continue;
+            }
+
+            // Packet matched!
+            received = true;
+            result->rx_count++;
+
+            // Calculate latency
+            if (rx_ts > 0 && tx_ts > 0) {
+                uint64_t latency = rx_ts - tx_ts;
+
+                result->total_latency_ns += latency;
+                if (latency < result->min_latency_ns) {
+                    result->min_latency_ns = latency;
+                }
+                if (latency > result->max_latency_ns) {
+                    result->max_latency_ns = latency;
                 }
 
-                tx_records[i].used = false;  // Mark as matched
-                result->rx_count++;
-                matched = true;
-                break;
+                LOG_DEBUG("Pkt[%d] Latency: %lu ns (%.2f us)", pkt, latency, ns_to_us(latency));
+            } else {
+                LOG_WARN("Pkt[%d] Missing timestamp: tx_ts=%lu, rx_ts=%lu", pkt, tx_ts, rx_ts);
             }
         }
 
-        if (!matched) {
-            LOG_WARN("RX packet with unknown seq=%lu", rx_seq);
+        if (!received && !g_interrupted) {
+            LOG_DEBUG("Pkt[%d] No response received (timeout)", pkt);
         }
     }
 
-    // =========================================
     // Finalize result
-    // =========================================
     if (result->rx_count > 0) {
         result->valid = true;
         if (result->min_latency_ns == UINT64_MAX) {
             result->min_latency_ns = 0;
         }
     } else {
-        snprintf(result->error_msg, sizeof(result->error_msg),
-                "No packets received");
+        snprintf(result->error_msg, sizeof(result->error_msg), "No packets received");
     }
 
     LOG_INFO("VLAN %u: TX=%u, RX=%u, Min=%.2f us, Avg=%.2f us, Max=%.2f us",
@@ -274,13 +205,6 @@ int run_vlan_test(const struct port_pair *pair,
             ns_to_us(result->min_latency_ns),
             result->rx_count > 0 ? ns_to_us(result->total_latency_ns / result->rx_count) : 0.0,
             ns_to_us(result->max_latency_ns));
-
-    // Cleanup
-    free(rx_buf);
-    free(pkt_buf);
-    free(tx_records);
-    close_hw_timestamp_socket(&tx_sock);
-    close_hw_timestamp_socket(&rx_sock);
 
     return 0;
 }
@@ -297,10 +221,48 @@ int run_port_pair_test(const struct port_pair *pair,
             pair->tx_port, pair->tx_iface,
             pair->rx_port, pair->rx_iface);
 
-    for (int v = 0; v < pair->vlan_count && !g_interrupted; v++) {
-        run_vlan_test(pair, v, config, &results[v]);
+    // Open sockets ONCE for the entire port pair
+    struct hw_socket tx_sock, rx_sock;
 
-        // 32µs bekleme (son VLAN hariç)
+    int ret = create_hw_timestamp_socket(pair->tx_iface, SOCK_TYPE_TX, &tx_sock);
+    if (ret < 0) {
+        LOG_ERROR("Failed to create TX socket for %s: %d", pair->tx_iface, ret);
+        // Fill all results with error
+        for (int v = 0; v < pair->vlan_count; v++) {
+            memset(&results[v], 0, sizeof(results[v]));
+            results[v].tx_port = pair->tx_port;
+            results[v].rx_port = pair->rx_port;
+            results[v].vlan_id = pair->vlans[v];
+            results[v].vl_id = pair->vl_ids[v];
+            snprintf(results[v].error_msg, sizeof(results[v].error_msg), "TX socket error");
+        }
+        return -1;
+    }
+
+    ret = create_hw_timestamp_socket(pair->rx_iface, SOCK_TYPE_RX, &rx_sock);
+    if (ret < 0) {
+        LOG_ERROR("Failed to create RX socket for %s: %d", pair->rx_iface, ret);
+        close_hw_timestamp_socket(&tx_sock);
+        for (int v = 0; v < pair->vlan_count; v++) {
+            memset(&results[v], 0, sizeof(results[v]));
+            results[v].tx_port = pair->tx_port;
+            results[v].rx_port = pair->rx_port;
+            results[v].vlan_id = pair->vlans[v];
+            results[v].vl_id = pair->vl_ids[v];
+            snprintf(results[v].error_msg, sizeof(results[v].error_msg), "RX socket error");
+        }
+        return -2;
+    }
+
+    // Test each VLAN
+    for (int v = 0; v < pair->vlan_count && !g_interrupted; v++) {
+        run_single_vlan_test(
+            &tx_sock, &rx_sock,
+            pair->tx_port, pair->rx_port,
+            pair->vlans[v], pair->vl_ids[v],
+            config, &results[v]);
+
+        // 32µs delay between VLAN tests (except after last one)
         if (v < pair->vlan_count - 1 && !g_interrupted) {
             LOG_TRACE("Waiting %d us before next VLAN test...", config->delay_us);
 
@@ -311,6 +273,10 @@ int run_port_pair_test(const struct port_pair *pair,
             }
         }
     }
+
+    // Close sockets
+    close_hw_timestamp_socket(&tx_sock);
+    close_hw_timestamp_socket(&rx_sock);
 
     return 0;
 }
@@ -328,9 +294,11 @@ int run_latency_test(const struct test_config *config,
     LOG_INFO("  Packet size: %d bytes", config->packet_size);
     LOG_INFO("  Inter-VLAN delay: %d us", config->delay_us);
     LOG_INFO("  RX timeout: %d ms", config->timeout_ms);
-    LOG_INFO("  Port filter: %s",
-            config->port_filter < 0 ? "all" :
-            (char[16]){0} + sprintf((char[16]){0}, "%d", config->port_filter));
+    if (config->port_filter >= 0) {
+        LOG_INFO("  Port filter: %d", config->port_filter);
+    } else {
+        LOG_INFO("  Port filter: all");
+    }
 
     *result_count = 0;
 
@@ -346,7 +314,7 @@ int run_latency_test(const struct test_config *config,
         run_port_pair_test(pair, config, &results[*result_count]);
         *result_count += pair->vlan_count;
 
-        // Port çiftleri arasında da 32µs bekle
+        // Delay between port pairs
         if (p < NUM_PORT_PAIRS - 1 && !g_interrupted) {
             LOG_TRACE("Waiting %d us before next port pair...", config->delay_us);
 
@@ -361,4 +329,33 @@ int run_latency_test(const struct test_config *config,
     LOG_INFO("Latency test completed. Total results: %d", *result_count);
 
     return 0;
+}
+
+// Legacy function for compatibility
+int run_vlan_test(const struct port_pair *pair,
+                  int vlan_idx,
+                  const struct test_config *config,
+                  struct latency_result *result) {
+    // Open sockets
+    struct hw_socket tx_sock, rx_sock;
+
+    int ret = create_hw_timestamp_socket(pair->tx_iface, SOCK_TYPE_TX, &tx_sock);
+    if (ret < 0) return -1;
+
+    ret = create_hw_timestamp_socket(pair->rx_iface, SOCK_TYPE_RX, &rx_sock);
+    if (ret < 0) {
+        close_hw_timestamp_socket(&tx_sock);
+        return -2;
+    }
+
+    ret = run_single_vlan_test(
+        &tx_sock, &rx_sock,
+        pair->tx_port, pair->rx_port,
+        pair->vlans[vlan_idx], pair->vl_ids[vlan_idx],
+        config, result);
+
+    close_hw_timestamp_socket(&tx_sock);
+    close_hw_timestamp_socket(&rx_sock);
+
+    return ret;
 }

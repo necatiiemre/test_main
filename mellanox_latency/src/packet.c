@@ -170,12 +170,18 @@ uint16_t extract_vl_id(const uint8_t *packet, size_t packet_len) {
 }
 
 uint64_t extract_seq_num(const uint8_t *packet, size_t packet_len) {
-    if (packet_len < TOTAL_HDR_SIZE + SEQ_NUM_SIZE) {
-        LOG_TRACE("Packet too short for seq_num: %zu bytes", packet_len);
+    // Check if packet has VLAN tag
+    const struct eth_hdr *eth = (const struct eth_hdr *)packet;
+    bool has_vlan = (ntohs(eth->ether_type) == ETH_P_8021Q);
+
+    size_t hdr_size = has_vlan ? TOTAL_HDR_SIZE : TOTAL_HDR_SIZE_UNTAGGED;
+
+    if (packet_len < hdr_size + SEQ_NUM_SIZE) {
+        LOG_TRACE("Packet too short for seq_num: %zu bytes (need %zu)", packet_len, hdr_size + SEQ_NUM_SIZE);
         return 0;
     }
 
-    const uint8_t *payload = packet + TOTAL_HDR_SIZE;
+    const uint8_t *payload = packet + hdr_size;
     uint64_t seq_be;
     memcpy(&seq_be, payload, sizeof(seq_be));
 
@@ -187,11 +193,14 @@ bool is_our_test_packet(const uint8_t *packet,
                         uint16_t expected_vlan,
                         uint16_t expected_vlid) {
 
-    if (packet_len < TOTAL_HDR_SIZE) {
+    // Check if packet has VLAN tag or is untagged
+    const struct eth_hdr *eth = (const struct eth_hdr *)packet;
+    bool has_vlan = (ntohs(eth->ether_type) == ETH_P_8021Q);
+
+    size_t min_len = has_vlan ? TOTAL_HDR_SIZE : TOTAL_HDR_SIZE_UNTAGGED;
+    if (packet_len < min_len) {
         return false;
     }
-
-    const struct eth_hdr *eth = (const struct eth_hdr *)packet;
 
     // Check DST MAC prefix: 03:00:00:00:XX:XX
     if (eth->dst_mac[0] != g_dst_mac_prefix[0] ||
@@ -203,14 +212,17 @@ bool is_our_test_packet(const uint8_t *packet,
         return false;
     }
 
-    // Check EtherType (VLAN)
-    if (ntohs(eth->ether_type) != ETH_P_8021Q) {
-        LOG_TRACE("Not VLAN tagged: ether_type=0x%04x", ntohs(eth->ether_type));
-        return false;
+    // Check VL-ID (from DST MAC, always present)
+    if (expected_vlid != 0) {
+        uint16_t vl_id = extract_vl_id(packet, packet_len);
+        if (vl_id != expected_vlid) {
+            LOG_TRACE("VL-ID mismatch: expected=%u, got=%u", expected_vlid, vl_id);
+            return false;
+        }
     }
 
-    // Check VLAN ID if specified
-    if (expected_vlan != 0) {
+    // Check VLAN ID if specified AND packet has VLAN tag
+    if (expected_vlan != 0 && has_vlan) {
         uint16_t vlan_id = extract_vlan_id(packet, packet_len);
         if (vlan_id != expected_vlan) {
             LOG_TRACE("VLAN mismatch: expected=%u, got=%u", expected_vlan, vlan_id);
@@ -218,13 +230,10 @@ bool is_our_test_packet(const uint8_t *packet,
         }
     }
 
-    // Check VL-ID if specified
-    if (expected_vlid != 0) {
-        uint16_t vl_id = extract_vl_id(packet, packet_len);
-        if (vl_id != expected_vlid) {
-            LOG_TRACE("VL-ID mismatch: expected=%u, got=%u", expected_vlid, vl_id);
-            return false;
-        }
+    // If packet is untagged (VLAN stripped by switch), that's OK
+    // We match by VL-ID and sequence number instead
+    if (!has_vlan) {
+        LOG_TRACE("Packet is untagged (VLAN stripped by switch), matching by VL-ID");
     }
 
     return true;

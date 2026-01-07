@@ -109,6 +109,7 @@ static const uint8_t g_dst_mac_prefix[4] = {0x03, 0x00, 0x00, 0x00};
 #define IP_HDR_SIZE         20          // IPv4 header (no options)
 #define UDP_HDR_SIZE        8           // UDP header
 #define TOTAL_HDR_SIZE      (ETH_HDR_SIZE + VLAN_HDR_SIZE + IP_HDR_SIZE + UDP_HDR_SIZE)  // 46 bytes
+#define TOTAL_HDR_SIZE_UNTAGGED (ETH_HDR_SIZE + IP_HDR_SIZE + UDP_HDR_SIZE)  // 42 bytes (no VLAN)
 
 // ============================================
 // DEBUG LEVELS

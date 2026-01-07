@@ -117,14 +117,14 @@ static void log_printf(const char *format, ...) {
 // Interface names - Mellanox ConnectX-6 interfaces
 // Use: ip link show | grep "enp\|eth\|mlx"
 static const char *interface_names[NUM_PORTS] = {
-    "enp1s0f0",   // Port 0
-    "enp1s0f1",   // Port 1
-    "enp2s0f0",   // Port 2
-    "enp2s0f1",   // Port 3
-    "enp3s0f0",   // Port 4
-    "enp3s0f1",   // Port 5
-    "enp4s0f0",   // Port 6
-    "enp4s0f1",   // Port 7
+    "ens2f0np0",   // Port 0
+    "ens2f1np1",   // Port 1
+    "ens1f0np0",   // Port 2
+    "ens1f1np1",   // Port 3
+    "ens3f0np0",   // Port 4
+    "ens3f1np1",   // Port 5
+    "ens5f0np0",   // Port 6
+    "ens5f1np1",   // Port 7
 };
 
 // Port pairing: TX port -> RX port (cross-NIC pairs via switch)

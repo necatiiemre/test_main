@@ -113,7 +113,38 @@ bool Dtn::configureSequence()
     //               << timeForwarder.getLastError() << std::endl;
     // }
 
-    //DPDK - arka planda çalıştır (sürekli çalışan uygulama)
+    // ==========================================
+    // WIRE LATENCY TEST - DPDK'dan önce çalıştır
+    // Gerçek wire-to-wire latency ölçümü (SO_TIMESTAMPING)
+    // ==========================================
+    std::cout << "\n=== WIRE LATENCY TEST ===" << std::endl;
+    std::cout << "Deploying wire latency test (kernel SO_TIMESTAMPING)..." << std::endl;
+
+    if (!g_ssh_deployer_server.deployAndBuild(
+            "latency_test",     // kaynak klasör
+            "wire_latency_test", // binary adı
+            true,               // çalıştır
+            true,               // sudo ile (raw socket için gerekli)
+            BuildSystem::MAKE,  // Makefile kullan
+            "",                 // runtime args
+            "",                 // make args
+            false               // ön planda çalıştır (tamamlanmasını bekle)
+            ))
+    {
+        std::cout << "DTN: Wire latency test failed! Continuing anyway..." << std::endl;
+        // Hata olsa bile devam et, DPDK çalışabilir
+    }
+    else
+    {
+        std::cout << "DTN: Wire latency test completed successfully!" << std::endl;
+    }
+
+    sleep(2);  // Latency test bitmeden DPDK başlamasın
+
+    // ==========================================
+    // DPDK - arka planda çalıştır (sürekli çalışan uygulama)
+    // ==========================================
+    std::cout << "\n=== DPDK APPLICATION ===" << std::endl;
     if (!g_ssh_deployer_server.deployAndBuild(
             "dpdk",            // kaynak klasör
             "",                // app name (otomatik algılar)

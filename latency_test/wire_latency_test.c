@@ -176,7 +176,6 @@ static uint16_t get_vl_id(int port_id, int vlan_index) {
     return vlan_to_vl_id(vlan_ids[port_id][vlan_index]);
 }
 
-#define PACKET_SIZE     1500
 #define TIMEOUT_SEC     5
 
 // ============================================
@@ -203,27 +202,27 @@ static volatile bool g_running = true;
 static bool g_hw_ts_available = false;  // Set after first successful HW timestamp
 
 // ============================================
-// VLAN PACKET STRUCTURE
+// PACKET STRUCTURE (DPDK compatible - NO VLAN tag)
 // ============================================
 
-struct vlan_ethhdr {
-    uint8_t  h_dest[ETH_ALEN];
-    uint8_t  h_source[ETH_ALEN];
-    uint16_t h_vlan_proto;      // 0x8100
-    uint16_t h_vlan_TCI;        // VLAN ID
-    uint16_t h_vlan_encap_proto; // Inner protocol (0x0800 = IPv4)
-} __attribute__((packed));
+// Packet sizes (matching DPDK raw_socket_port.c)
+#define RAW_PKT_ETH_HDR_SIZE  14
+#define RAW_PKT_IP_HDR_SIZE   20
+#define RAW_PKT_UDP_HDR_SIZE  8
+#define RAW_PKT_PAYLOAD_SIZE  100
+#define RAW_PKT_TOTAL_SIZE    (RAW_PKT_ETH_HDR_SIZE + RAW_PKT_IP_HDR_SIZE + RAW_PKT_UDP_HDR_SIZE + RAW_PKT_PAYLOAD_SIZE)
 
-struct test_payload {
-    uint16_t magic;         // 0xABCD
-    uint16_t tx_port;
-    uint16_t vlan_id;
-    uint16_t vl_id;
-    uint64_t sequence;
-    uint64_t tx_timestamp;  // Filled by sender
-} __attribute__((packed));
-
-#define MAGIC_VALUE 0xABCD
+// IP checksum calculation
+static uint16_t calculate_ip_checksum(uint8_t *ip_header) {
+    uint32_t sum = 0;
+    for (int i = 0; i < RAW_PKT_IP_HDR_SIZE; i += 2) {
+        sum += ((uint16_t)ip_header[i] << 8) | ip_header[i + 1];
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return ~sum;
+}
 
 // ============================================
 // SOCKET SETUP WITH SO_TIMESTAMPING
@@ -367,49 +366,97 @@ static int send_test_packet(int port_id, int vlan_idx) {
     uint16_t vlan_id = vlan_ids[port_id][vlan_idx];
     uint16_t vl_id = get_vl_id(port_id, vlan_idx);
     int rx_port = port_pairs[port_id];
+    (void)vlan_id;  // Not used in untagged packets
 
-    uint8_t packet[PACKET_SIZE];
+    uint8_t packet[RAW_PKT_TOTAL_SIZE];
     memset(packet, 0, sizeof(packet));
 
-    // VLAN Ethernet header
-    struct vlan_ethhdr *eth = (struct vlan_ethhdr *)packet;
+    // ==========================================
+    // ETHERNET HEADER (14 bytes) - NO VLAN TAG
+    // Same format as DPDK raw_socket_port.c
+    // ==========================================
 
     // Destination MAC: 03:00:00:00:VV:VV (multicast with VL-ID)
-    eth->h_dest[0] = 0x03;
-    eth->h_dest[1] = 0x00;
-    eth->h_dest[2] = 0x00;
-    eth->h_dest[3] = 0x00;
-    eth->h_dest[4] = (vl_id >> 8) & 0xFF;
-    eth->h_dest[5] = vl_id & 0xFF;
+    packet[0] = 0x03;
+    packet[1] = 0x00;
+    packet[2] = 0x00;
+    packet[3] = 0x00;
+    packet[4] = (vl_id >> 8) & 0xFF;
+    packet[5] = vl_id & 0xFF;
 
-    // Source MAC: 02:00:00:00:00:PP (port ID)
-    eth->h_source[0] = 0x02;
-    eth->h_source[1] = 0x00;
-    eth->h_source[2] = 0x00;
-    eth->h_source[3] = 0x00;
-    eth->h_source[4] = 0x00;
-    eth->h_source[5] = port_id;
+    // Source MAC: 02:00:00:00:00:20 (fixed, same as DPDK)
+    packet[6] = 0x02;
+    packet[7] = 0x00;
+    packet[8] = 0x00;
+    packet[9] = 0x00;
+    packet[10] = 0x00;
+    packet[11] = 0x20;
 
-    // VLAN tag
-    eth->h_vlan_proto = htons(ETH_P_8021Q);
-    eth->h_vlan_TCI = htons(vlan_id);
-    eth->h_vlan_encap_proto = htons(ETH_P_IP);
+    // EtherType: 0x0800 (IPv4) - NO VLAN
+    packet[12] = 0x08;
+    packet[13] = 0x00;
 
-    // Test payload (after VLAN header)
-    struct test_payload *payload = (struct test_payload *)(packet + sizeof(struct vlan_ethhdr) + 20 + 8);  // +IP+UDP
-    payload->magic = htons(MAGIC_VALUE);
-    payload->tx_port = htons(port_id);
-    payload->vlan_id = htons(vlan_id);
-    payload->vl_id = htons(vl_id);
-    payload->sequence = 0;
+    // ==========================================
+    // IPv4 HEADER (20 bytes)
+    // ==========================================
+    uint8_t *ip = packet + RAW_PKT_ETH_HDR_SIZE;
+    ip[0] = 0x45;  // Version + IHL
+    ip[1] = 0x00;  // DSCP + ECN
+    uint16_t ip_total_len = RAW_PKT_IP_HDR_SIZE + RAW_PKT_UDP_HDR_SIZE + RAW_PKT_PAYLOAD_SIZE;
+    ip[2] = (ip_total_len >> 8) & 0xFF;
+    ip[3] = ip_total_len & 0xFF;
+    ip[4] = 0x00;  // ID
+    ip[5] = 0x00;
+    ip[6] = 0x40;  // Flags (DF)
+    ip[7] = 0x00;  // Fragment offset
+    ip[8] = 0x01;  // TTL
+    ip[9] = 0x11;  // Protocol (UDP)
+    ip[10] = 0x00; // Checksum (will be calculated)
+    ip[11] = 0x00;
+    // Source IP: 10.0.0.0
+    ip[12] = 10;
+    ip[13] = 0;
+    ip[14] = 0;
+    ip[15] = 0;
+    // Destination IP: 224.224.VV.VV (multicast)
+    ip[16] = 224;
+    ip[17] = 224;
+    ip[18] = (vl_id >> 8) & 0xFF;
+    ip[19] = vl_id & 0xFF;
+
+    // Calculate IP checksum
+    uint16_t ip_checksum = calculate_ip_checksum(ip);
+    ip[10] = (ip_checksum >> 8) & 0xFF;
+    ip[11] = ip_checksum & 0xFF;
+
+    // ==========================================
+    // UDP HEADER (8 bytes)
+    // ==========================================
+    uint8_t *udp = ip + RAW_PKT_IP_HDR_SIZE;
+    udp[0] = 0x00;  // Source port (100)
+    udp[1] = 0x64;
+    udp[2] = 0x00;  // Destination port (100)
+    udp[3] = 0x64;
+    uint16_t udp_len = RAW_PKT_UDP_HDR_SIZE + RAW_PKT_PAYLOAD_SIZE;
+    udp[4] = (udp_len >> 8) & 0xFF;
+    udp[5] = udp_len & 0xFF;
+    udp[6] = 0x00;  // Checksum (optional for IPv4)
+    udp[7] = 0x00;
+
+    // ==========================================
+    // PAYLOAD (sequence number)
+    // ==========================================
+    uint8_t *payload = udp + RAW_PKT_UDP_HDR_SIZE;
+    uint64_t sequence = 0;
+    memcpy(payload, &sequence, sizeof(sequence));
 
     // Send packet
     struct sockaddr_ll sll;
     memset(&sll, 0, sizeof(sll));
     sll.sll_family = AF_PACKET;
-    sll.sll_ifindex = 0;  // Will be set by kernel
+    sll.sll_ifindex = 0;
     sll.sll_halen = ETH_ALEN;
-    memcpy(sll.sll_addr, eth->h_dest, ETH_ALEN);
+    memcpy(sll.sll_addr, packet, ETH_ALEN);  // Copy dest MAC
 
     // Get interface index
     struct ifreq ifr;
@@ -422,7 +469,7 @@ static int send_test_packet(int port_id, int vlan_idx) {
     // Get software timestamp BEFORE send (for fallback)
     uint64_t tx_sw_ts = get_sw_timestamp();
 
-    ssize_t sent = sendto(sockets[port_id], packet, PACKET_SIZE, 0,
+    ssize_t sent = sendto(sockets[port_id], packet, RAW_PKT_TOTAL_SIZE, 0,
                           (struct sockaddr *)&sll, sizeof(sll));
 
     if (sent < 0) {
@@ -492,25 +539,24 @@ static void *rx_thread(void *arg) {
         // Get RX hardware timestamp (may be 0 if not available)
         uint64_t rx_hw_ts = get_hw_timestamp(&msg);
 
-        // Check if VLAN tagged
+        // Check if IPv4 packet (0x0800) - NO VLAN tag
         struct ethhdr *eth = (struct ethhdr *)buffer;
-        if (ntohs(eth->h_proto) != ETH_P_8021Q) continue;
+        if (ntohs(eth->h_proto) != ETH_P_IP) continue;
 
-        // Extract VLAN ID
-        uint16_t *vlan_tci = (uint16_t *)(buffer + 14);
-        uint16_t vlan_id = ntohs(*vlan_tci) & 0xFFF;
+        // Check minimum packet size
+        if (len < RAW_PKT_TOTAL_SIZE) continue;
+
+        // Check destination MAC format: 03:00:00:00:VV:VV
+        if (buffer[0] != 0x03 || buffer[1] != 0x00 ||
+            buffer[2] != 0x00 || buffer[3] != 0x00) continue;
 
         // Extract VL-ID from destination MAC
         uint16_t vl_id = ((uint16_t)buffer[4] << 8) | buffer[5];
 
-        // Extract source port from source MAC (for future use)
-        (void)buffer[11];  // src_port available in buffer if needed
-
-        // Match with sent packet
+        // Match with sent packet by VL-ID
         for (int v = 0; v < VLANS_PER_PORT; v++) {
             int expected_tx_port = port_pairs[port_id];
-            if (results[expected_tx_port][v].vlan_id == vlan_id &&
-                results[expected_tx_port][v].vl_id == vl_id &&
+            if (results[expected_tx_port][v].vl_id == vl_id &&
                 !results[expected_tx_port][v].valid) {
 
                 results[expected_tx_port][v].rx_hw_ts = rx_hw_ts;

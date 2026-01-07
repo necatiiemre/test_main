@@ -214,6 +214,21 @@ int create_hw_timestamp_socket(const char *if_name, socket_type_t type, struct h
         return -3;
     }
 
+    // Enable promiscuous mode for RX socket (needed for multicast packets)
+    if (type == SOCK_TYPE_RX) {
+        struct packet_mreq mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.mr_ifindex = sock->if_index;
+        mreq.mr_type = PACKET_MR_PROMISC;
+
+        if (setsockopt(sock->fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            LOG_WARN("Failed to enable promiscuous mode on %s: %s (continuing anyway)",
+                    if_name, strerror(errno));
+        } else {
+            LOG_DEBUG("Promiscuous mode enabled on %s", if_name);
+        }
+    }
+
     // Enable hardware timestamping
     int ts_flags = SOF_TIMESTAMPING_RAW_HARDWARE;
 

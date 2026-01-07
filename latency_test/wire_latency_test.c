@@ -41,7 +41,7 @@
 // CONFIGURATION
 // ============================================
 
-#define NUM_PORTS       8
+#define NUM_PORTS       4
 #define VLANS_PER_PORT  4
 #define PACKETS_PER_VLAN 1
 
@@ -114,47 +114,47 @@ static void log_printf(const char *format, ...) {
     }
 }
 
-// Interface names - MODIFY THESE FOR YOUR SYSTEM
+// Interface names - Auto-detected Mellanox interfaces
 // Use: ip link show | grep "enp\|eth\|mlx"
 static const char *interface_names[NUM_PORTS] = {
     "enp1s0f0",   // Port 0
     "enp1s0f1",   // Port 1
     "enp2s0f0",   // Port 2
     "enp2s0f1",   // Port 3
-    "enp3s0f0",   // Port 4
-    "enp3s0f1",   // Port 5
-    "enp4s0f0",   // Port 6
-    "enp4s0f1",   // Port 7
 };
 
-// Port pairing: TX port -> RX port
+// Port pairing: TX port -> RX port (same NIC pairs)
+// NIC 0: Port 0 <-> Port 1
+// NIC 1: Port 2 <-> Port 3
 static const int port_pairs[NUM_PORTS] = {
-    7,  // Port 0 -> Port 7
-    6,  // Port 1 -> Port 6
-    5,  // Port 2 -> Port 5
-    4,  // Port 3 -> Port 4
-    3,  // Port 4 -> Port 3
-    2,  // Port 5 -> Port 2
-    1,  // Port 6 -> Port 1
-    0,  // Port 7 -> Port 0
+    1,  // Port 0 -> Port 1
+    0,  // Port 1 -> Port 0
+    3,  // Port 2 -> Port 3
+    2,  // Port 3 -> Port 2
 };
 
-// VLAN IDs per port
+// VLAN IDs per port (from config.h)
 static const uint16_t vlan_ids[NUM_PORTS][VLANS_PER_PORT] = {
     {105, 106, 107, 108},  // Port 0
     {109, 110, 111, 112},  // Port 1
     {97,  98,  99,  100},  // Port 2
     {101, 102, 103, 104},  // Port 3
-    {113, 114, 115, 116},  // Port 4
-    {117, 118, 119, 120},  // Port 5
-    {121, 122, 123, 124},  // Port 6
-    {125, 126, 127, 128},  // Port 7
 };
 
-// VL-ID calculation: matches DPDK version
-// vl_id = vlan_index * 128 + (port_id * 4 + local_index) + 3
+// VL-IDs per port (from config.h tx_vl_ids)
+// These are the START values for each queue's VL-ID range
+static const uint16_t vl_ids[NUM_PORTS][VLANS_PER_PORT] = {
+    {1027, 1155, 1283, 1411},  // Port 0
+    {1539, 1667, 1795, 1923},  // Port 1
+    {3,    131,  259,  387},   // Port 2
+    {515,  643,  771,  899},   // Port 3
+};
+
+// Get VL-ID from table
 static uint16_t get_vl_id(int port_id, int vlan_index) {
-    return (uint16_t)(vlan_index * 128 + (port_id * 4) + 3);
+    if (port_id < 0 || port_id >= NUM_PORTS) return 0;
+    if (vlan_index < 0 || vlan_index >= VLANS_PER_PORT) return 0;
+    return vl_ids[port_id][vlan_index];
 }
 
 #define PACKET_SIZE     1500
@@ -171,13 +171,17 @@ struct latency_result {
     uint16_t vl_id;
     uint64_t tx_hw_ts;      // Hardware TX timestamp (ns)
     uint64_t rx_hw_ts;      // Hardware RX timestamp (ns)
+    uint64_t tx_sw_ts;      // Software TX timestamp (ns) - fallback
+    uint64_t rx_sw_ts;      // Software RX timestamp (ns) - fallback
     int64_t latency_ns;     // Wire latency (ns)
+    bool hw_ts_valid;       // True if hardware timestamp available
     bool valid;
 };
 
 static struct latency_result results[NUM_PORTS][VLANS_PER_PORT];
 static int sockets[NUM_PORTS] = {-1};
 static volatile bool g_running = true;
+static bool g_hw_ts_available = false;  // Set after first successful HW timestamp
 
 // ============================================
 // VLAN PACKET STRUCTURE
@@ -298,6 +302,13 @@ static uint64_t get_hw_timestamp(struct msghdr *msg) {
     return 0;
 }
 
+// Get software timestamp (fallback when HW timestamp not available)
+static uint64_t get_sw_timestamp(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
 // ============================================
 // GET TX TIMESTAMP FROM ERROR QUEUE
 // ============================================
@@ -389,6 +400,9 @@ static int send_test_packet(int port_id, int vlan_idx) {
         sll.sll_ifindex = ifr.ifr_ifindex;
     }
 
+    // Get software timestamp BEFORE send (for fallback)
+    uint64_t tx_sw_ts = get_sw_timestamp();
+
     ssize_t sent = sendto(sockets[port_id], packet, PACKET_SIZE, 0,
                           (struct sockaddr *)&sll, sizeof(sll));
 
@@ -397,16 +411,22 @@ static int send_test_packet(int port_id, int vlan_idx) {
         return -1;
     }
 
-    // Get TX hardware timestamp
-    uint64_t tx_ts = get_tx_timestamp(sockets[port_id]);
+    // Try to get TX hardware timestamp
+    uint64_t tx_hw_ts = get_tx_timestamp(sockets[port_id]);
 
     // Store result
     results[port_id][vlan_idx].tx_port = port_id;
     results[port_id][vlan_idx].rx_port = rx_port;
     results[port_id][vlan_idx].vlan_id = vlan_id;
     results[port_id][vlan_idx].vl_id = vl_id;
-    results[port_id][vlan_idx].tx_hw_ts = tx_ts;
+    results[port_id][vlan_idx].tx_hw_ts = tx_hw_ts;
+    results[port_id][vlan_idx].tx_sw_ts = tx_sw_ts;
+    results[port_id][vlan_idx].hw_ts_valid = (tx_hw_ts > 0);
     results[port_id][vlan_idx].valid = false;
+
+    if (tx_hw_ts > 0) {
+        g_hw_ts_available = true;  // HW timestamp works
+    }
 
     return 0;
 }
@@ -444,12 +464,14 @@ static void *rx_thread(void *arg) {
         int ret = poll(&pfd, 1, 100);
         if (ret <= 0) continue;
 
+        // Get software timestamp immediately
+        uint64_t rx_sw_ts = get_sw_timestamp();
+
         ssize_t len = recvmsg(sock, &msg, 0);
         if (len < 0) continue;
 
-        // Get RX hardware timestamp
-        uint64_t rx_ts = get_hw_timestamp(&msg);
-        if (rx_ts == 0) continue;
+        // Get RX hardware timestamp (may be 0 if not available)
+        uint64_t rx_hw_ts = get_hw_timestamp(&msg);
 
         // Check if VLAN tagged
         struct ethhdr *eth = (struct ethhdr *)buffer;
@@ -472,12 +494,21 @@ static void *rx_thread(void *arg) {
                 results[expected_tx_port][v].vl_id == vl_id &&
                 !results[expected_tx_port][v].valid) {
 
-                results[expected_tx_port][v].rx_hw_ts = rx_ts;
+                results[expected_tx_port][v].rx_hw_ts = rx_hw_ts;
+                results[expected_tx_port][v].rx_sw_ts = rx_sw_ts;
 
-                // Calculate latency
-                if (results[expected_tx_port][v].tx_hw_ts > 0) {
+                // Calculate latency - prefer HW timestamp, fallback to SW
+                if (rx_hw_ts > 0 && results[expected_tx_port][v].tx_hw_ts > 0) {
+                    // Use hardware timestamps (most accurate)
                     results[expected_tx_port][v].latency_ns =
-                        (int64_t)rx_ts - (int64_t)results[expected_tx_port][v].tx_hw_ts;
+                        (int64_t)rx_hw_ts - (int64_t)results[expected_tx_port][v].tx_hw_ts;
+                    results[expected_tx_port][v].hw_ts_valid = true;
+                    results[expected_tx_port][v].valid = true;
+                } else {
+                    // Fallback to software timestamps
+                    results[expected_tx_port][v].latency_ns =
+                        (int64_t)rx_sw_ts - (int64_t)results[expected_tx_port][v].tx_sw_ts;
+                    results[expected_tx_port][v].hw_ts_valid = false;
                     results[expected_tx_port][v].valid = true;
                 }
                 break;
@@ -495,12 +526,17 @@ static void *rx_thread(void *arg) {
 static void print_results(void) {
     log_printf("\n");
     log_printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    log_printf("║                    WIRE LATENCY TEST RESULTS (Hardware Timestamps)                       ║\n");
+    if (g_hw_ts_available) {
+        log_printf("║                    WIRE LATENCY TEST RESULTS (Hardware Timestamps)                       ║\n");
+    } else {
+        log_printf("║                    WIRE LATENCY TEST RESULTS (Software Timestamps)                       ║\n");
+    }
     log_printf("╠══════════╦══════════╦══════════╦══════════╦═══════════════════╦═══════════════════════════╣\n");
     log_printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (us)     ║  Status                   ║\n");
     log_printf("╠══════════╬══════════╬══════════╬══════════╬═══════════════════╬═══════════════════════════╣\n");
 
     int success_count = 0;
+    int hw_ts_count = 0;
     double total_latency = 0;
     double min_latency = 1e9;
     double max_latency = 0;
@@ -514,17 +550,17 @@ static void print_results(void) {
 
             if (r->valid && r->latency_ns > 0) {
                 double lat_us = r->latency_ns / 1000.0;
-                log_printf("     %10.3f    ║  OK                       ║\n", lat_us);
+                const char *ts_type = r->hw_ts_valid ? "HW" : "SW";
+                log_printf("     %10.3f    ║  OK (%s)                   ║\n", lat_us, ts_type);
                 success_count++;
+                if (r->hw_ts_valid) hw_ts_count++;
                 total_latency += lat_us;
                 if (lat_us < min_latency) min_latency = lat_us;
                 if (lat_us > max_latency) max_latency = lat_us;
-            } else if (r->tx_hw_ts == 0) {
-                log_printf("         -         ║  No TX timestamp          ║\n");
-            } else if (r->rx_hw_ts == 0) {
-                log_printf("         -         ║  No RX (timeout/lost)     ║\n");
+            } else if (!r->valid && r->vlan_id == 0) {
+                log_printf("         -         ║  Not tested               ║\n");
             } else {
-                log_printf("         -         ║  Invalid                  ║\n");
+                log_printf("         -         ║  No RX (timeout/lost)     ║\n");
             }
         }
     }
@@ -532,12 +568,13 @@ static void print_results(void) {
     log_printf("╠══════════╩══════════╩══════════╩══════════╩═══════════════════╩═══════════════════════════╣\n");
 
     if (success_count > 0) {
-        log_printf("║  SUMMARY: %d/%d successful                                                              ║\n",
-               success_count, NUM_PORTS * VLANS_PER_PORT);
+        log_printf("║  SUMMARY: %d/%d successful (%d HW, %d SW timestamps)                                     ║\n",
+               success_count, NUM_PORTS * VLANS_PER_PORT, hw_ts_count, success_count - hw_ts_count);
         log_printf("║  Min: %.3f us  |  Avg: %.3f us  |  Max: %.3f us                                      ║\n",
                min_latency, total_latency / success_count, max_latency);
     } else {
         log_printf("║  SUMMARY: No successful measurements                                                    ║\n");
+        log_printf("║  Note: Packets may not be reaching destination (check switch/cable)                    ║\n");
     }
 
     log_printf("╚══════════════════════════════════════════════════════════════════════════════════════════╝\n");
@@ -545,14 +582,15 @@ static void print_results(void) {
     // Also write CSV format to log file for easy parsing
     if (g_log_file && success_count > 0) {
         fprintf(g_log_file, "\n=== CSV FORMAT ===\n");
-        fprintf(g_log_file, "tx_port,rx_port,vlan_id,vl_id,latency_ns,latency_us\n");
+        fprintf(g_log_file, "tx_port,rx_port,vlan_id,vl_id,latency_ns,latency_us,timestamp_type\n");
         for (int p = 0; p < NUM_PORTS; p++) {
             for (int v = 0; v < VLANS_PER_PORT; v++) {
                 struct latency_result *r = &results[p][v];
                 if (r->valid && r->latency_ns > 0) {
-                    fprintf(g_log_file, "%d,%d,%d,%d,%ld,%.3f\n",
+                    fprintf(g_log_file, "%d,%d,%d,%d,%ld,%.3f,%s\n",
                            r->tx_port, r->rx_port, r->vlan_id, r->vl_id,
-                           r->latency_ns, r->latency_ns / 1000.0);
+                           r->latency_ns, r->latency_ns / 1000.0,
+                           r->hw_ts_valid ? "HW" : "SW");
                 }
             }
         }

@@ -29,6 +29,38 @@
 // ==========================================
 #if LATENCY_TEST_ENABLED
 
+// ==========================================
+// PTP PACKET FORMAT FOR IEEE1588 TIMESTAMPING
+// ==========================================
+#define RTE_ETHER_TYPE_PTP  0x88F7
+
+// PTP message types
+#define PTP_MSG_SYNC        0x0
+#define PTP_MSG_DELAY_REQ   0x1
+#define PTP_MSG_FOLLOW_UP   0x8
+#define PTP_MSG_DELAY_RESP  0x9
+
+// PTP header (simplified for SYNC message)
+struct ptp_header {
+    uint8_t msg_type;           // Lower 4 bits = message type, upper 4 bits = transport specific
+    uint8_t version;            // PTP version (2 for IEEE1588-2008)
+    uint16_t msg_length;        // Total PTP message length
+    uint8_t domain_number;      // PTP domain
+    uint8_t reserved1;
+    uint16_t flags;             // PTP flags
+    int64_t correction;         // Correction field (ns * 2^16)
+    uint32_t reserved2;
+    uint8_t source_port_id[10]; // Clock identity (8) + port number (2)
+    uint16_t sequence_id;       // Sequence number
+    uint8_t control;            // Control field (deprecated)
+    int8_t log_msg_interval;    // Log of message interval
+    // For SYNC: 10 bytes of timestamp follows
+    uint8_t timestamp[10];      // Origin timestamp (seconds + nanoseconds)
+} __attribute__((packed));
+
+// PTP packet mode flag
+static bool g_ptp_packet_mode = false;
+
 // Global variables for hardware timestamp
 static int g_timestamp_dynfield_offset = -1;
 static uint64_t g_timestamp_rx_dynflag = 0;
@@ -234,6 +266,11 @@ static bool init_timesync(uint16_t num_ports)
         printf("\n  IEEE 1588 Timesync: ENABLED (PTP-adjusted timestamps)\n");
     } else {
         printf("\n  IEEE 1588 Timesync: NOT AVAILABLE\n");
+        printf("\n  EXPERIMENTAL: Trying PTP packet format for hardware timestamping...\n");
+        printf("    Will send PTP SYNC packets (EtherType 0x88F7)\n");
+        printf("    Will set RTE_MBUF_F_TX_IEEE1588_TMST flag on TX\n");
+        printf("    Will check RTE_MBUF_F_RX_IEEE1588_PTP and RTE_MBUF_F_RX_IEEE1588_TMST on RX\n");
+        g_ptp_packet_mode = true;
     }
 
     return any_success;
@@ -2434,6 +2471,122 @@ static int build_latency_test_packet(struct rte_mbuf *mbuf,
 }
 
 /**
+ * Build PTP (IEEE1588) latency test packet
+ * Format: [ETH type=0x88F7][PTP SYNC Header][Custom payload with VL-ID]
+ * This format should trigger hardware IEEE1588 timestamping
+ */
+static int build_ptp_latency_test_packet(struct rte_mbuf *mbuf,
+                                          uint16_t port_id,
+                                          uint16_t vl_id,
+                                          uint64_t sequence)
+{
+    uint8_t *pkt = rte_pktmbuf_mtod(mbuf, uint8_t *);
+    memset(pkt, 0, 128);  // Clear header area
+
+    // ==========================================
+    // ETHERNET HEADER (14 bytes)
+    // ==========================================
+    struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
+
+    // PTP multicast destination MAC: 01:1B:19:00:00:00
+    eth->dst_addr.addr_bytes[0] = 0x01;
+    eth->dst_addr.addr_bytes[1] = 0x1B;
+    eth->dst_addr.addr_bytes[2] = 0x19;
+    eth->dst_addr.addr_bytes[3] = 0x00;
+    eth->dst_addr.addr_bytes[4] = (uint8_t)(vl_id >> 8);    // Encode VL-ID in MAC
+    eth->dst_addr.addr_bytes[5] = (uint8_t)(vl_id & 0xFF);
+
+    // Source MAC: port-specific
+    eth->src_addr.addr_bytes[0] = 0x02;
+    eth->src_addr.addr_bytes[1] = 0x00;
+    eth->src_addr.addr_bytes[2] = 0x00;
+    eth->src_addr.addr_bytes[3] = 0x00;
+    eth->src_addr.addr_bytes[4] = 0x00;
+    eth->src_addr.addr_bytes[5] = (uint8_t)port_id;
+
+    // PTP Ethertype
+    eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_PTP);
+
+    // ==========================================
+    // PTP HEADER (34 bytes for SYNC)
+    // ==========================================
+    struct ptp_header *ptp = (struct ptp_header *)(pkt + sizeof(struct rte_ether_hdr));
+
+    // Message type: SYNC (0x00)
+    // Transport specific: 0x0 (IEEE 802.3)
+    ptp->msg_type = PTP_MSG_SYNC;
+
+    // Version: PTPv2 (IEEE 1588-2008)
+    ptp->version = 0x02;
+
+    // Message length (header + timestamp = 44 bytes)
+    ptp->msg_length = rte_cpu_to_be_16(44);
+
+    // Domain number
+    ptp->domain_number = 0;
+
+    // Flags: two-step = 0 (one-step sync)
+    ptp->flags = 0;
+
+    // Correction field
+    ptp->correction = 0;
+
+    // Source port identity (clock ID + port number)
+    // Encode port_id in clock identity
+    ptp->source_port_id[0] = 0x02;
+    ptp->source_port_id[1] = 0x00;
+    ptp->source_port_id[2] = 0x00;
+    ptp->source_port_id[3] = 0xFF;
+    ptp->source_port_id[4] = 0xFE;
+    ptp->source_port_id[5] = 0x00;
+    ptp->source_port_id[6] = 0x00;
+    ptp->source_port_id[7] = (uint8_t)port_id;
+    // Port number
+    ptp->source_port_id[8] = 0x00;
+    ptp->source_port_id[9] = 0x01;
+
+    // Sequence ID (use for matching TX/RX)
+    ptp->sequence_id = rte_cpu_to_be_16((uint16_t)(sequence & 0xFFFF));
+
+    // Control field (0 for SYNC)
+    ptp->control = 0x00;
+
+    // Log message interval
+    ptp->log_msg_interval = 0;
+
+    // Origin timestamp (10 bytes) - will be filled by hardware or we put dummy
+    memset(ptp->timestamp, 0, 10);
+
+    // ==========================================
+    // CUSTOM PAYLOAD AFTER PTP HEADER
+    // Encode VL-ID and sequence for our matching logic
+    // ==========================================
+    uint8_t *payload = pkt + sizeof(struct rte_ether_hdr) + sizeof(struct ptp_header);
+
+    // VL-ID (2 bytes)
+    *(uint16_t *)payload = rte_cpu_to_be_16(vl_id);
+
+    // Sequence (8 bytes)
+    *(uint64_t *)(payload + 2) = sequence;
+
+    // Set packet length (ETH + PTP header + custom payload)
+    uint16_t pkt_len = sizeof(struct rte_ether_hdr) + sizeof(struct ptp_header) + 10;
+
+    // Pad to minimum Ethernet frame size (64 bytes)
+    if (pkt_len < 64) {
+        pkt_len = 64;
+    }
+
+    mbuf->data_len = pkt_len;
+    mbuf->pkt_len = pkt_len;
+
+    // Set IEEE1588 TX timestamp flag
+    mbuf->ol_flags |= RTE_MBUF_F_TX_IEEE1588_TMST;
+
+    return 0;
+}
+
+/**
  * Get the paired port for latency test
  * Port mapping for direct connection (no switch):
  *   Port 0 <-> Port 7
@@ -2540,7 +2693,12 @@ static int latency_tx_worker(void *arg)
             }
 
             // Build packet with sequence number = p (timestamp will be set below)
-            build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
+            if (g_ptp_packet_mode) {
+                // EXPERIMENTAL: Use PTP packet format for IEEE1588 timestamping
+                build_ptp_latency_test_packet(mbuf, port_id, vl_id, p);
+            } else {
+                build_latency_test_packet(mbuf, port_id, vlan_id, vl_id, p, 0);
+            }
 
             // Send packet using ONLY queue 0 for latency test
             uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &mbuf, 1);
@@ -2549,8 +2707,26 @@ static int latency_tx_worker(void *arg)
                 rte_pktmbuf_free(mbuf);
             } else {
                 result->tx_count++;
-                // Get TX timestamp AFTER sending for accuracy
-                if (g_timesync_enabled) {
+                // Get TX timestamp AFTER sending
+
+                // EXPERIMENTAL: Try to read IEEE1588 TX timestamp first
+                if (g_ptp_packet_mode) {
+                    struct timespec tx_ts;
+                    int ret = rte_eth_timesync_read_tx_timestamp(port_id, &tx_ts);
+                    if (ret == 0) {
+                        result->tx_timestamp = (uint64_t)tx_ts.tv_sec * 1000000000ULL + tx_ts.tv_nsec;
+                        // Debug: show first TX timestamp read success
+                        static uint32_t tx_ts_debug = 0;
+                        if (tx_ts_debug < 3) {
+                            printf("  [PTP TX] Port %u: IEEE1588 TX timestamp: %ld.%09ld\n",
+                                   port_id, tx_ts.tv_sec, tx_ts.tv_nsec);
+                            tx_ts_debug++;
+                        }
+                    } else {
+                        // Fallback to raw NIC clock
+                        result->tx_timestamp = get_nic_clock(port_id);
+                    }
+                } else if (g_timesync_enabled) {
                     // IEEE 1588 timesync - PTP-adjusted timestamp
                     uint64_t ts = get_timesync_time_ns(port_id);
                     result->tx_timestamp = (ts != 0) ? ts : rte_rdtsc();
@@ -2628,16 +2804,54 @@ static int latency_rx_worker(void *arg)
         for (uint16_t j = 0; j < nb_rx; j++) {
             struct rte_mbuf *m = pkts[j];
             uint8_t *pkt = rte_pktmbuf_mtod(m, uint8_t *);
+            struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
 
-            // Quick length check
-            if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
-                rte_pktmbuf_free(m);
-                continue;
+            // Check if this is a PTP packet (EtherType 0x88F7)
+            bool is_ptp_packet = (rte_be_to_cpu_16(eth->ether_type) == RTE_ETHER_TYPE_PTP);
+
+            uint16_t vl_id;
+            if (is_ptp_packet && g_ptp_packet_mode) {
+                // PTP packet: Extract VL-ID from DST MAC bytes 4-5
+                vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+
+                // Debug: Print PTP packet info
+                static uint32_t ptp_debug_count = 0;
+                if (ptp_debug_count < 5) {
+                    printf("  [PTP RX] Port %u: Received PTP packet!\n", port_id);
+                    printf("    EtherType: 0x%04x\n", rte_be_to_cpu_16(eth->ether_type));
+                    printf("    ol_flags: 0x%lx\n", (unsigned long)m->ol_flags);
+
+                    // Check IEEE1588 flags
+                    #ifdef RTE_MBUF_F_RX_IEEE1588_PTP
+                    printf("    RTE_MBUF_F_RX_IEEE1588_PTP: %d\n",
+                           (m->ol_flags & RTE_MBUF_F_RX_IEEE1588_PTP) ? 1 : 0);
+                    #endif
+                    #ifdef RTE_MBUF_F_RX_IEEE1588_TMST
+                    printf("    RTE_MBUF_F_RX_IEEE1588_TMST: %d\n",
+                           (m->ol_flags & RTE_MBUF_F_RX_IEEE1588_TMST) ? 1 : 0);
+                    #endif
+
+                    // Try to read IEEE1588 RX timestamp
+                    struct timespec rx_ts;
+                    int ret = rte_eth_timesync_read_rx_timestamp(port_id, &rx_ts, 0);
+                    printf("    rte_eth_timesync_read_rx_timestamp(): %d", ret);
+                    if (ret == 0) {
+                        printf(" -> %ld.%09ld\n", rx_ts.tv_sec, rx_ts.tv_nsec);
+                    } else {
+                        printf(" (%s)\n", rte_strerror(-ret));
+                    }
+
+                    ptp_debug_count++;
+                }
+            } else {
+                // Regular packet: Quick length check
+                if (m->pkt_len < payload_offset + LATENCY_PAYLOAD_OFFSET) {
+                    rte_pktmbuf_free(m);
+                    continue;
+                }
+                // Extract VL-ID from DST MAC (bytes 4-5)
+                vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
             }
-
-            // Extract VL-ID from DST MAC (bytes 4-5)
-            uint8_t *pkt_data = pkt;
-            uint16_t vl_id = ((uint16_t)pkt_data[4] << 8) | pkt_data[5];
 
             // Get RX timestamp
             uint64_t rx_timestamp = 0;
@@ -2645,8 +2859,20 @@ static int latency_rx_worker(void *arg)
             bool mbuf_ts_found = false;
             bool using_timesync = false;
 
+            // Option 0: PTP packet mode - try IEEE1588 RX timestamp
+            if (g_ptp_packet_mode && is_ptp_packet) {
+                struct timespec rx_ts;
+                int ret = rte_eth_timesync_read_rx_timestamp(port_id, &rx_ts, 0);
+                if (ret == 0) {
+                    rx_timestamp = (uint64_t)rx_ts.tv_sec * 1000000000ULL + rx_ts.tv_nsec;
+                    hw_ts_valid = true;
+                    using_timesync = true;
+                    mbuf_ts_count++;
+                }
+            }
+
             // Option 1: IEEE 1588 Timesync (PTP-adjusted)
-            if (g_timesync_enabled) {
+            if (!hw_ts_valid && g_timesync_enabled) {
                 rx_timestamp = get_timesync_time_ns(port_id);
                 if (rx_timestamp != 0) {
                     hw_ts_valid = true;

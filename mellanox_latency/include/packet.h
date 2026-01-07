@@ -26,9 +26,11 @@ struct __attribute__((packed)) eth_hdr {
 };
 
 // VLAN header (4 bytes) - 802.1Q
+// Note: TPID (0x8100) is in eth_hdr.ether_type
+// This struct contains only the fields AFTER the TPID
 struct __attribute__((packed)) vlan_hdr {
-    uint16_t tpid;          // Tag Protocol ID (0x8100)
     uint16_t tci;           // Tag Control Info: PRI(3) + DEI(1) + VID(12)
+    uint16_t next_proto;    // Next protocol EtherType (0x0800 for IP)
 };
 
 // IPv4 header (20 bytes, no options)

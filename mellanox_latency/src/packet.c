@@ -82,9 +82,10 @@ int build_test_packet(uint8_t *buffer,
     hdr->eth.ether_type = htons(ETH_P_8021Q);
 
     // ---- VLAN Header ----
-    hdr->vlan.tpid = htons(ETH_P_IP);  // Next protocol: IP
     // TCI: Priority(0) + DEI(0) + VLAN ID
     hdr->vlan.tci = htons(vlan_id & 0x0FFF);
+    // Next protocol: IP
+    hdr->vlan.next_proto = htons(ETH_P_IP);
 
     // ---- IP Header ----
     hdr->ip.version_ihl = (PKT_IP_VERSION << 4) | PKT_IP_IHL;

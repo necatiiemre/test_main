@@ -261,6 +261,37 @@ static bool init_timesync(uint16_t num_ports)
         }
     }
 
+    // Check TX timestamp offload capabilities
+    printf("\n=== Checking TX Timestamp Offload Capabilities ===\n");
+    for (uint16_t port = 0; port < num_ports && port < MAX_PORTS; port++) {
+        struct rte_eth_dev_info dev_info;
+        rte_eth_dev_info_get(port, &dev_info);
+
+        printf("  Port %u TX offloads:\n", port);
+        printf("    Supported: 0x%lx\n", (unsigned long)dev_info.tx_offload_capa);
+
+        // Check specific timestamp-related offloads
+        #ifdef RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP
+        printf("    RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP: %s\n",
+               (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP) ? "YES" : "NO");
+        #else
+        printf("    RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP: (not defined)\n");
+        #endif
+
+        // Check if IEEE1588 TX offload is defined
+        #ifdef RTE_ETH_TX_OFFLOAD_IEEE1588_TMST
+        printf("    RTE_ETH_TX_OFFLOAD_IEEE1588_TMST: %s\n",
+               (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_IEEE1588_TMST) ? "YES" : "NO");
+        #endif
+
+        // Check RX timestamp offload
+        printf("    RX offload supported: 0x%lx\n", (unsigned long)dev_info.rx_offload_capa);
+        #ifdef RTE_ETH_RX_OFFLOAD_TIMESTAMP
+        printf("    RTE_ETH_RX_OFFLOAD_TIMESTAMP: %s\n",
+               (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP) ? "YES" : "NO");
+        #endif
+    }
+
     if (any_success) {
         g_timesync_enabled = true;
         printf("\n  IEEE 1588 Timesync: ENABLED (PTP-adjusted timestamps)\n");

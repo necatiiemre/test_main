@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <poll.h>
 
+#include <stdarg.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
@@ -43,6 +44,75 @@
 #define NUM_PORTS       8
 #define VLANS_PER_PORT  4
 #define PACKETS_PER_VLAN 1
+
+// Log file configuration
+#define LOG_DIR         "/home/user/test_main/logs"
+#define LOG_PREFIX      "wire_latency"
+static FILE *g_log_file = NULL;
+static char g_log_filename[256];
+
+// ============================================
+// LOG FILE FUNCTIONS
+// ============================================
+
+static void open_log_file(void) {
+    // Create log directory if it doesn't exist
+    char mkdir_cmd[300];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", LOG_DIR);
+    if (system(mkdir_cmd) != 0) {
+        // Ignore errors - directory may already exist
+    }
+
+    // Generate filename with timestamp
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
+
+    snprintf(g_log_filename, sizeof(g_log_filename), "%s/%s_%s.log",
+             LOG_DIR, LOG_PREFIX, timestamp);
+
+    g_log_file = fopen(g_log_filename, "w");
+    if (g_log_file) {
+        printf("Log file: %s\n", g_log_filename);
+        // Write header
+        fprintf(g_log_file, "Wire Latency Test Log\n");
+        fprintf(g_log_file, "Started: %s", ctime(&now));
+        fprintf(g_log_file, "=========================================\n\n");
+        fflush(g_log_file);
+    } else {
+        fprintf(stderr, "Warning: Could not create log file: %s\n", g_log_filename);
+    }
+}
+
+static void close_log_file(void) {
+    if (g_log_file) {
+        time_t now = time(NULL);
+        fprintf(g_log_file, "\n=========================================\n");
+        fprintf(g_log_file, "Finished: %s", ctime(&now));
+        fclose(g_log_file);
+        g_log_file = NULL;
+        printf("Log saved: %s\n", g_log_filename);
+    }
+}
+
+// Printf to both stdout and log file
+static void log_printf(const char *format, ...) {
+    va_list args;
+
+    // Print to stdout
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+
+    // Print to log file
+    if (g_log_file) {
+        va_start(args, format);
+        vfprintf(g_log_file, format, args);
+        va_end(args);
+        fflush(g_log_file);
+    }
+}
 
 // Interface names - MODIFY THESE FOR YOUR SYSTEM
 // Use: ip link show | grep "enp\|eth\|mlx"
@@ -205,7 +275,7 @@ static int setup_socket(int port_id) {
         // Not critical, continue
     }
 
-    printf("  Port %d (%s): Socket ready, HW timestamping enabled\n", port_id, ifname);
+    log_printf("  Port %d (%s): Socket ready, HW timestamping enabled\n", port_id, ifname);
     return sock;
 }
 
@@ -392,8 +462,8 @@ static void *rx_thread(void *arg) {
         // Extract VL-ID from destination MAC
         uint16_t vl_id = ((uint16_t)buffer[4] << 8) | buffer[5];
 
-        // Extract source port from source MAC
-        int src_port = buffer[11];
+        // Extract source port from source MAC (for future use)
+        (void)buffer[11];  // src_port available in buffer if needed
 
         // Match with sent packet
         for (int v = 0; v < VLANS_PER_PORT; v++) {
@@ -423,12 +493,12 @@ static void *rx_thread(void *arg) {
 // ============================================
 
 static void print_results(void) {
-    printf("\n");
-    printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                    WIRE LATENCY TEST RESULTS (Hardware Timestamps)                       ║\n");
-    printf("╠══════════╦══════════╦══════════╦══════════╦═══════════════════╦═══════════════════════════╣\n");
-    printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (µs)     ║  Status                   ║\n");
-    printf("╠══════════╬══════════╬══════════╬══════════╬═══════════════════╬═══════════════════════════╣\n");
+    log_printf("\n");
+    log_printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
+    log_printf("║                    WIRE LATENCY TEST RESULTS (Hardware Timestamps)                       ║\n");
+    log_printf("╠══════════╦══════════╦══════════╦══════════╦═══════════════════╦═══════════════════════════╣\n");
+    log_printf("║ TX Port  ║ RX Port  ║  VLAN    ║  VL-ID   ║  Latency (us)     ║  Status                   ║\n");
+    log_printf("╠══════════╬══════════╬══════════╬══════════╬═══════════════════╬═══════════════════════════╣\n");
 
     int success_count = 0;
     double total_latency = 0;
@@ -439,38 +509,55 @@ static void print_results(void) {
         for (int v = 0; v < VLANS_PER_PORT; v++) {
             struct latency_result *r = &results[p][v];
 
-            printf("║   %3d    ║   %3d    ║   %3d    ║  %5d   ║",
+            log_printf("║   %3d    ║   %3d    ║   %3d    ║  %5d   ║",
                    r->tx_port, r->rx_port, r->vlan_id, r->vl_id);
 
             if (r->valid && r->latency_ns > 0) {
                 double lat_us = r->latency_ns / 1000.0;
-                printf("     %10.3f    ║  ✓ OK                     ║\n", lat_us);
+                log_printf("     %10.3f    ║  OK                       ║\n", lat_us);
                 success_count++;
                 total_latency += lat_us;
                 if (lat_us < min_latency) min_latency = lat_us;
                 if (lat_us > max_latency) max_latency = lat_us;
             } else if (r->tx_hw_ts == 0) {
-                printf("         -         ║  ✗ No TX timestamp        ║\n");
+                log_printf("         -         ║  No TX timestamp          ║\n");
             } else if (r->rx_hw_ts == 0) {
-                printf("         -         ║  ✗ No RX (timeout/lost)   ║\n");
+                log_printf("         -         ║  No RX (timeout/lost)     ║\n");
             } else {
-                printf("         -         ║  ✗ Invalid                ║\n");
+                log_printf("         -         ║  Invalid                  ║\n");
             }
         }
     }
 
-    printf("╠══════════╩══════════╩══════════╩══════════╩═══════════════════╩═══════════════════════════╣\n");
+    log_printf("╠══════════╩══════════╩══════════╩══════════╩═══════════════════╩═══════════════════════════╣\n");
 
     if (success_count > 0) {
-        printf("║  SUMMARY: %d/%d successful                                                              ║\n",
+        log_printf("║  SUMMARY: %d/%d successful                                                              ║\n",
                success_count, NUM_PORTS * VLANS_PER_PORT);
-        printf("║  Min: %.3f µs  |  Avg: %.3f µs  |  Max: %.3f µs                                    ║\n",
+        log_printf("║  Min: %.3f us  |  Avg: %.3f us  |  Max: %.3f us                                      ║\n",
                min_latency, total_latency / success_count, max_latency);
     } else {
-        printf("║  SUMMARY: No successful measurements                                                    ║\n");
+        log_printf("║  SUMMARY: No successful measurements                                                    ║\n");
     }
 
-    printf("╚══════════════════════════════════════════════════════════════════════════════════════════╝\n");
+    log_printf("╚══════════════════════════════════════════════════════════════════════════════════════════╝\n");
+
+    // Also write CSV format to log file for easy parsing
+    if (g_log_file && success_count > 0) {
+        fprintf(g_log_file, "\n=== CSV FORMAT ===\n");
+        fprintf(g_log_file, "tx_port,rx_port,vlan_id,vl_id,latency_ns,latency_us\n");
+        for (int p = 0; p < NUM_PORTS; p++) {
+            for (int v = 0; v < VLANS_PER_PORT; v++) {
+                struct latency_result *r = &results[p][v];
+                if (r->valid && r->latency_ns > 0) {
+                    fprintf(g_log_file, "%d,%d,%d,%d,%ld,%.3f\n",
+                           r->tx_port, r->rx_port, r->vlan_id, r->vl_id,
+                           r->latency_ns, r->latency_ns / 1000.0);
+                }
+            }
+        }
+        fflush(g_log_file);
+    }
 }
 
 // ============================================
@@ -478,7 +565,11 @@ static void print_results(void) {
 // ============================================
 
 static void signal_handler(int sig) {
+    (void)sig;
     printf("\nStopping...\n");
+    if (g_log_file) {
+        fprintf(g_log_file, "\nStopped by signal\n");
+    }
     g_running = false;
 }
 
@@ -487,6 +578,9 @@ static void signal_handler(int sig) {
 // ============================================
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
+
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║           WIRE LATENCY TEST (Kernel SO_TIMESTAMPING)             ║\n");
     printf("║  Hardware TX/RX timestamps for true wire-to-wire latency         ║\n");
@@ -501,8 +595,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Open log file
+    open_log_file();
+
     // Initialize sockets
-    printf("=== Initializing Sockets ===\n");
+    log_printf("=== Initializing Sockets ===\n");
     for (int p = 0; p < NUM_PORTS; p++) {
         sockets[p] = setup_socket(p);
         if (sockets[p] < 0) {
@@ -512,7 +609,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Start RX threads
-    printf("\n=== Starting RX Threads ===\n");
+    log_printf("\n=== Starting RX Threads ===\n");
     pthread_t rx_threads[NUM_PORTS];
     int port_ids[NUM_PORTS];
 
@@ -520,27 +617,27 @@ int main(int argc, char *argv[]) {
         if (sockets[p] < 0) continue;
         port_ids[p] = p;
         pthread_create(&rx_threads[p], NULL, rx_thread, &port_ids[p]);
-        printf("  RX thread started for port %d\n", p);
+        log_printf("  RX thread started for port %d\n", p);
     }
 
     // Small delay for RX threads to start
     usleep(100000);
 
     // Send test packets
-    printf("\n=== Sending Test Packets ===\n");
+    log_printf("\n=== Sending Test Packets ===\n");
     for (int p = 0; p < NUM_PORTS; p++) {
         if (sockets[p] < 0) continue;
 
         for (int v = 0; v < VLANS_PER_PORT; v++) {
             send_test_packet(p, v);
-            printf("  TX: Port %d -> VLAN %d, VL-ID %d\n",
+            log_printf("  TX: Port %d -> VLAN %d, VL-ID %d\n",
                    p, vlan_ids[p][v], get_vl_id(p, v));
             usleep(10000);  // 10ms between packets
         }
     }
 
     // Wait for RX threads
-    printf("\n=== Waiting for Packets (timeout: %d sec) ===\n", TIMEOUT_SEC);
+    log_printf("\n=== Waiting for Packets (timeout: %d sec) ===\n", TIMEOUT_SEC);
     for (int p = 0; p < NUM_PORTS; p++) {
         if (sockets[p] < 0) continue;
         pthread_join(rx_threads[p], NULL);
@@ -555,6 +652,9 @@ int main(int argc, char *argv[]) {
             close(sockets[p]);
         }
     }
+
+    // Close log file
+    close_log_file();
 
     return 0;
 }

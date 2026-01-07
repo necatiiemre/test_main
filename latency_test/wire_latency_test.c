@@ -41,7 +41,7 @@
 // CONFIGURATION
 // ============================================
 
-#define NUM_PORTS       4
+#define NUM_PORTS       8
 #define VLANS_PER_PORT  4
 #define PACKETS_PER_VLAN 1
 
@@ -114,23 +114,33 @@ static void log_printf(const char *format, ...) {
     }
 }
 
-// Interface names - Auto-detected Mellanox interfaces
+// Interface names - Mellanox ConnectX-6 interfaces
 // Use: ip link show | grep "enp\|eth\|mlx"
 static const char *interface_names[NUM_PORTS] = {
     "enp1s0f0",   // Port 0
     "enp1s0f1",   // Port 1
     "enp2s0f0",   // Port 2
     "enp2s0f1",   // Port 3
+    "enp3s0f0",   // Port 4
+    "enp3s0f1",   // Port 5
+    "enp4s0f0",   // Port 6
+    "enp4s0f1",   // Port 7
 };
 
-// Port pairing: TX port -> RX port (same NIC pairs)
-// NIC 0: Port 0 <-> Port 1
-// NIC 1: Port 2 <-> Port 3
+// Port pairing: TX port -> RX port (cross-NIC pairs via switch)
+// Port 0 <-> Port 7
+// Port 1 <-> Port 6
+// Port 2 <-> Port 5
+// Port 3 <-> Port 4
 static const int port_pairs[NUM_PORTS] = {
-    1,  // Port 0 -> Port 1
-    0,  // Port 1 -> Port 0
-    3,  // Port 2 -> Port 3
-    2,  // Port 3 -> Port 2
+    7,  // Port 0 -> Port 7
+    6,  // Port 1 -> Port 6
+    5,  // Port 2 -> Port 5
+    4,  // Port 3 -> Port 4
+    3,  // Port 4 -> Port 3
+    2,  // Port 5 -> Port 2
+    1,  // Port 6 -> Port 1
+    0,  // Port 7 -> Port 0
 };
 
 // VLAN IDs per port (from config.h)
@@ -139,6 +149,10 @@ static const uint16_t vlan_ids[NUM_PORTS][VLANS_PER_PORT] = {
     {109, 110, 111, 112},  // Port 1
     {97,  98,  99,  100},  // Port 2
     {101, 102, 103, 104},  // Port 3
+    {113, 114, 115, 116},  // Port 4
+    {117, 118, 119, 120},  // Port 5
+    {121, 122, 123, 124},  // Port 6
+    {125, 126, 127, 128},  // Port 7
 };
 
 // VL-ID calculation from VLAN:

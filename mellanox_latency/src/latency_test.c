@@ -21,6 +21,9 @@
 #include "common.h"
 #include "config.h"
 
+// Interrupt flag (defined in main.c)
+extern volatile int g_interrupted;
+
 // ============================================
 // INTERNAL STRUCTURES
 // ============================================
@@ -138,7 +141,7 @@ int run_vlan_test(const struct port_pair *pair,
     // =========================================
     LOG_DEBUG("Sending %d packets for VLAN %u...", config->packet_count, vlan_id);
 
-    for (int pkt = 0; pkt < config->packet_count; pkt++) {
+    for (int pkt = 0; pkt < config->packet_count && !g_interrupted; pkt++) {
         uint64_t seq_num = (uint64_t)vlan_id << 32 | (uint64_t)pkt;
 
         // Build packet
@@ -187,7 +190,7 @@ int run_vlan_test(const struct port_pair *pair,
     int remaining_timeout = config->timeout_ms;
     uint64_t start_time = get_time_ns();
 
-    while (remaining_timeout > 0 && result->rx_count < result->tx_count) {
+    while (remaining_timeout > 0 && result->rx_count < result->tx_count && !g_interrupted) {
         size_t rx_len = config->packet_size + 64;
         uint64_t rx_ts = 0;
 
@@ -198,6 +201,11 @@ int run_vlan_test(const struct port_pair *pair,
             uint64_t elapsed_ms = (get_time_ns() - start_time) / 1000000;
             remaining_timeout = config->timeout_ms - (int)elapsed_ms;
             continue;
+        }
+
+        if (ret == -10) {
+            // Interrupted by signal, exit gracefully
+            break;
         }
 
         if (ret < 0) {
@@ -289,11 +297,11 @@ int run_port_pair_test(const struct port_pair *pair,
             pair->tx_port, pair->tx_iface,
             pair->rx_port, pair->rx_iface);
 
-    for (int v = 0; v < pair->vlan_count; v++) {
+    for (int v = 0; v < pair->vlan_count && !g_interrupted; v++) {
         run_vlan_test(pair, v, config, &results[v]);
 
         // 32µs bekleme (son VLAN hariç)
-        if (v < pair->vlan_count - 1) {
+        if (v < pair->vlan_count - 1 && !g_interrupted) {
             LOG_TRACE("Waiting %d us before next VLAN test...", config->delay_us);
 
             if (config->use_busy_wait) {
@@ -326,7 +334,7 @@ int run_latency_test(const struct test_config *config,
 
     *result_count = 0;
 
-    for (int p = 0; p < NUM_PORT_PAIRS; p++) {
+    for (int p = 0; p < NUM_PORT_PAIRS && !g_interrupted; p++) {
         const struct port_pair *pair = &g_port_pairs[p];
 
         // Port filter
@@ -339,7 +347,7 @@ int run_latency_test(const struct test_config *config,
         *result_count += pair->vlan_count;
 
         // Port çiftleri arasında da 32µs bekle
-        if (p < NUM_PORT_PAIRS - 1) {
+        if (p < NUM_PORT_PAIRS - 1 && !g_interrupted) {
             LOG_TRACE("Waiting %d us before next port pair...", config->delay_us);
 
             if (config->use_busy_wait) {

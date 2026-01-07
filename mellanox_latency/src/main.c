@@ -38,7 +38,7 @@
 // ============================================
 
 int g_debug_level = DEBUG_LEVEL_NONE;
-static volatile int g_interrupted = 0;
+volatile int g_interrupted = 0;
 
 // ============================================
 // SIGNAL HANDLER

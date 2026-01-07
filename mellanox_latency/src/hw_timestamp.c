@@ -308,6 +308,11 @@ int send_packet_get_tx_timestamp(struct hw_socket *sock,
     int poll_ret = poll(&pfd, 1, 100);  // 100ms timeout for TX timestamp
 
     if (poll_ret < 0) {
+        if (errno == EINTR) {
+            // Interrupted by signal, return special code
+            LOG_DEBUG("poll() interrupted by signal waiting for TX timestamp");
+            return -10;
+        }
         LOG_ERROR_ERRNO("poll() failed waiting for TX timestamp");
         return -2;
     }
@@ -370,6 +375,11 @@ int recv_packet_get_rx_timestamp(struct hw_socket *sock,
     int poll_ret = poll(&pfd, 1, timeout_ms);
 
     if (poll_ret < 0) {
+        if (errno == EINTR) {
+            // Interrupted by signal (Ctrl+C), return special code
+            LOG_DEBUG("poll() interrupted by signal on %s", sock->if_name);
+            return -10;  // Interrupted
+        }
         LOG_ERROR_ERRNO("poll() failed on %s", sock->if_name);
         return -2;
     }

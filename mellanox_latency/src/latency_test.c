@@ -256,7 +256,8 @@ int run_port_pair_test(const struct port_pair *pair,
 
     // Small delay to let sockets fully initialize before first packet
     // This prevents the first VLAN test from failing
-    usleep(1000);  // 1ms
+    // 10ms seems to be needed for reliable first packet reception
+    usleep(10000);  // 10ms
     LOG_DEBUG("Sockets ready, starting VLAN tests");
 
     // Test each VLAN

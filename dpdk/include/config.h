@@ -17,7 +17,7 @@
 // - IMIX devre dışı, MAX paket boyutu (1518) kullanılır
 
 #ifndef LATENCY_TEST_ENABLED
-#define LATENCY_TEST_ENABLED 0
+#define LATENCY_TEST_ENABLED 1
 #endif
 
 #define LATENCY_TEST_TIMEOUT_SEC 5          // Paket bekleme timeout (saniye)

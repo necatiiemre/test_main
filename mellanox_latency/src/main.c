@@ -40,6 +40,26 @@
 int g_debug_level = DEBUG_LEVEL_NONE;
 volatile int g_interrupted = 0;
 
+// Global pointers for cleanup
+static struct latency_result *g_results = NULL;
+
+// ============================================
+// CLEANUP
+// ============================================
+
+static void cleanup(void) {
+    LOG_DEBUG("Temizlik yapiliyor...");
+
+    // Free results
+    if (g_results != NULL) {
+        free(g_results);
+        g_results = NULL;
+        LOG_DEBUG("Sonuc bellegi serbest birakildi");
+    }
+
+    LOG_DEBUG("Temizlik tamamlandi");
+}
+
 // ============================================
 // SIGNAL HANDLER
 // ============================================
@@ -47,7 +67,9 @@ volatile int g_interrupted = 0;
 static void signal_handler(int sig) {
     (void)sig;
     g_interrupted = 1;
-    printf("\nInterrupted, exiting...\n");
+    // Signal-safe output (ignore return value in signal handler)
+    const char *msg = "\nInterrupted, cleaning up...\n";
+    ssize_t ret __attribute__((unused)) = write(STDOUT_FILENO, msg, strlen(msg));
 }
 
 // ============================================
@@ -235,6 +257,9 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    // Register cleanup with atexit
+    atexit(cleanup);
+
     // Show interface info
     if (show_info) {
         show_interface_info();
@@ -274,9 +299,9 @@ int main(int argc, char *argv[]) {
         printf("\n");
     }
 
-    // Allocate results
-    struct latency_result *results = calloc(MAX_RESULTS, sizeof(struct latency_result));
-    if (!results) {
+    // Allocate results (use global pointer for cleanup)
+    g_results = calloc(MAX_RESULTS, sizeof(struct latency_result));
+    if (!g_results) {
         LOG_ERROR("Sonuc dizisi icin bellek ayrilamadi");
         return 1;
     }
@@ -285,33 +310,31 @@ int main(int argc, char *argv[]) {
 
     // Run test
     LOG_INFO("Test baslatiliyor...");
-    int ret = run_latency_test(&config, results, &result_count);
+    int ret = run_latency_test(&config, g_results, &result_count);
 
     if (g_interrupted) {
         LOG_WARN("Test kesildi");
     }
 
-    if (ret < 0) {
+    if (ret < 0 && !g_interrupted) {
         LOG_ERROR("Test basarisiz: %d", ret);
-        free(results);
-        return 1;
+        return 1;  // cleanup() will be called by atexit
     }
 
-    // Print results
-    if (csv_output) {
-        // Declare function from results.c
-        extern void print_results_csv(const struct latency_result *results, int result_count);
-        print_results_csv(results, result_count);
-    } else {
-        // Declare function from results.c
-        extern void print_results_table(const struct latency_result *results, int result_count, int packet_count);
-        print_results_table(results, result_count, config.packet_count);
+    // Print results (even if interrupted, show partial results)
+    if (result_count > 0) {
+        if (csv_output) {
+            // Declare function from results.c
+            extern void print_results_csv(const struct latency_result *results, int result_count);
+            print_results_csv(g_results, result_count);
+        } else {
+            // Declare function from results.c
+            extern void print_results_table(const struct latency_result *results, int result_count, int packet_count);
+            print_results_table(g_results, result_count, config.packet_count);
+        }
     }
-
-    // Cleanup
-    free(results);
 
     LOG_INFO("Test tamamlandi");
 
-    return 0;
+    return 0;  // cleanup() will be called by atexit
 }

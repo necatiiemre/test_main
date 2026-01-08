@@ -18,7 +18,7 @@
 #define DEFAULT_PACKET_INTERVAL_US  32      // VLAN testleri arası bekleme (µs)
 #define DEFAULT_PACKET_COUNT        1       // Her VLAN için varsayılan paket sayısı
 #define DEFAULT_PACKET_SIZE         1518    // Varsayılan paket boyutu (bytes)
-#define DEFAULT_TIMEOUT_MS          5000    // RX timeout (milisaniye)
+#define DEFAULT_TIMEOUT_MS          1000    // RX timeout (milisaniye) - 1 saniye
 #define MIN_PACKET_SIZE             64      // Minimum Ethernet frame
 #define MAX_PACKET_SIZE             1518    // Maximum Ethernet frame (no jumbo)
 

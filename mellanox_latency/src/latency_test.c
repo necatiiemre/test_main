@@ -196,15 +196,24 @@ static int run_single_vlan_test(
         if (result->min_latency_ns == UINT64_MAX) {
             result->min_latency_ns = 0;
         }
+
+        // Check against threshold (use max latency for pass/fail decision)
+        if (config->max_latency_ns > 0) {
+            result->passed = (result->max_latency_ns <= config->max_latency_ns);
+        } else {
+            result->passed = true;  // No threshold = always pass if packets received
+        }
     } else {
         snprintf(result->error_msg, sizeof(result->error_msg), "No packets received");
+        result->passed = false;  // No packets = FAIL
     }
 
-    LOG_INFO("VLAN %u: TX=%u, RX=%u, Min=%.2f us, Avg=%.2f us, Max=%.2f us",
+    LOG_INFO("VLAN %u: TX=%u, RX=%u, Min=%.2f us, Avg=%.2f us, Max=%.2f us, %s",
             vlan_id, result->tx_count, result->rx_count,
             ns_to_us(result->min_latency_ns),
             result->rx_count > 0 ? ns_to_us(result->total_latency_ns / result->rx_count) : 0.0,
-            ns_to_us(result->max_latency_ns));
+            ns_to_us(result->max_latency_ns),
+            result->passed ? "PASS" : "FAIL");
 
     return 0;
 }

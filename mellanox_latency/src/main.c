@@ -142,7 +142,8 @@ int main(int argc, char *argv[]) {
         .delay_us = DEFAULT_PACKET_INTERVAL_US,
         .timeout_ms = DEFAULT_TIMEOUT_MS,
         .port_filter = -1,
-        .use_busy_wait = false
+        .use_busy_wait = false,
+        .max_latency_ns = DEFAULT_MAX_LATENCY_NS
     };
 
     bool csv_output = false;
@@ -293,6 +294,7 @@ int main(int argc, char *argv[]) {
         printf("Paket boyutu: %d bytes\n", config.packet_size);
         printf("VLAN arasi bekleme: %d us\n", config.delay_us);
         printf("RX timeout: %d ms\n", config.timeout_ms);
+        printf("Max latency threshold: %lu ns (%.1f us)\n", config.max_latency_ns, (double)config.max_latency_ns / 1000.0);
         printf("Port filtresi: %s\n", config.port_filter < 0 ? "hepsi" : "belirtilen");
         printf("Bekleme modu: %s\n", config.use_busy_wait ? "busy-wait" : "sleep");
         printf("Debug seviyesi: %d\n", g_debug_level);

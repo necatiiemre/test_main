@@ -35,9 +35,10 @@
 #define COL_VLID    10
 #define COL_LAT     11
 #define COL_RXTX    10
+#define COL_RESULT  8
 
 // Total width (without outer borders)
-#define TABLE_WIDTH (COL_PORT + COL_PORT + COL_VLAN + COL_VLID + COL_LAT + COL_LAT + COL_LAT + COL_RXTX + 7)
+#define TABLE_WIDTH (COL_PORT + COL_PORT + COL_VLAN + COL_VLID + COL_LAT + COL_LAT + COL_LAT + COL_RXTX + COL_RESULT + 8)
 
 // ============================================
 // HELPER FUNCTIONS
@@ -60,6 +61,8 @@ static void print_horizontal_line(const char *left, const char *mid, const char 
     for (int i = 0; i < COL_LAT; i++) printf("%s", fill);
     printf("%s", mid);
     for (int i = 0; i < COL_RXTX; i++) printf("%s", fill);
+    printf("%s", mid);
+    for (int i = 0; i < COL_RESULT; i++) printf("%s", fill);
     printf("%s\n", right);
 }
 
@@ -81,11 +84,12 @@ static void print_title_line(const char *title) {
 void print_results_table(const struct latency_result *results, int result_count, int packet_count) {
     // Statistics
     int successful = 0;
+    int passed_count = 0;
     double total_avg_latency = 0.0;
     double min_of_mins = 1e9;
     double max_of_maxs = 0.0;
 
-    // Count successful
+    // Count successful and passed
     for (int i = 0; i < result_count; i++) {
         if (results[i].rx_count > 0) {
             successful++;
@@ -96,6 +100,9 @@ void print_results_table(const struct latency_result *results, int result_count,
             double max_lat = ns_to_us(results[i].max_latency_ns);
             if (min_lat < min_of_mins) min_of_mins = min_lat;
             if (max_lat > max_of_maxs) max_of_maxs = max_lat;
+        }
+        if (results[i].passed) {
+            passed_count++;
         }
     }
 
@@ -112,7 +119,7 @@ void print_results_table(const struct latency_result *results, int result_count,
     print_horizontal_line(TBL_TV, TBL_X, TBL_TVR, TBL_H);
 
     // Header row
-    printf("%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s\n",
+    printf("%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s\n",
            TBL_V, COL_PORT, "TX Port",
            TBL_V, COL_PORT, "RX Port",
            TBL_V, COL_VLAN, "VLAN",
@@ -121,6 +128,7 @@ void print_results_table(const struct latency_result *results, int result_count,
            TBL_V, COL_LAT, "Avg (us)",
            TBL_V, COL_LAT, "Max (us)",
            TBL_V, COL_RXTX, "RX/TX",
+           TBL_V, COL_RESULT, "Result",
            TBL_V);
 
     // Header bottom separator
@@ -131,6 +139,7 @@ void print_results_table(const struct latency_result *results, int result_count,
         const struct latency_result *r = &results[i];
 
         char min_str[16], avg_str[16], max_str[16], rxtx_str[16];
+        const char *result_str = r->passed ? "PASS" : "FAIL";
 
         if (r->rx_count > 0) {
             snprintf(min_str, sizeof(min_str), "%9.2f", ns_to_us(r->min_latency_ns));
@@ -144,7 +153,7 @@ void print_results_table(const struct latency_result *results, int result_count,
 
         snprintf(rxtx_str, sizeof(rxtx_str), "%4u/%-4u", r->rx_count, r->tx_count);
 
-        printf("%s%*u%s%*u%s%*u%s%*u%s%*s%s%*s%s%*s%s%*s%s\n",
+        printf("%s%*u%s%*u%s%*u%s%*u%s%*s%s%*s%s%*s%s%*s%s%*s%s\n",
                TBL_V, COL_PORT, r->tx_port,
                TBL_V, COL_PORT, r->rx_port,
                TBL_V, COL_VLAN, r->vlan_id,
@@ -153,6 +162,7 @@ void print_results_table(const struct latency_result *results, int result_count,
                TBL_V, COL_LAT, avg_str,
                TBL_V, COL_LAT, max_str,
                TBL_V, COL_RXTX, rxtx_str,
+               TBL_V, COL_RESULT, result_str,
                TBL_V);
     }
 
@@ -163,14 +173,15 @@ void print_results_table(const struct latency_result *results, int result_count,
     char summary[128];
     if (successful > 0) {
         snprintf(summary, sizeof(summary),
-                "OZET: %d/%d VLAN basarili | Ort. Latency: %.2f us | Paket/VLAN: %d",
-                successful, result_count,
+                "OZET: PASS %d/%d | Ort: %.2f us | Max: %.2f us | Paket/VLAN: %d",
+                passed_count, result_count,
                 total_avg_latency / successful,
+                max_of_maxs,
                 packet_count);
     } else {
         snprintf(summary, sizeof(summary),
-                "OZET: %d/%d VLAN basarili | Paket/VLAN: %d",
-                successful, result_count, packet_count);
+                "OZET: PASS %d/%d | Paket/VLAN: %d",
+                passed_count, result_count, packet_count);
     }
     print_title_line(summary);
 
@@ -223,7 +234,7 @@ void print_brief_summary(const struct latency_result *results, int result_count)
 // ============================================
 
 void print_results_csv(const struct latency_result *results, int result_count) {
-    printf("tx_port,rx_port,vlan,vl_id,min_us,avg_us,max_us,rx_count,tx_count\n");
+    printf("tx_port,rx_port,vlan,vl_id,min_us,avg_us,max_us,rx_count,tx_count,passed\n");
 
     for (int i = 0; i < result_count; i++) {
         const struct latency_result *r = &results[i];
@@ -232,9 +243,10 @@ void print_results_csv(const struct latency_result *results, int result_count) {
         double avg_us = r->rx_count > 0 ? ns_to_us(r->total_latency_ns / r->rx_count) : 0;
         double max_us = r->rx_count > 0 ? ns_to_us(r->max_latency_ns) : 0;
 
-        printf("%u,%u,%u,%u,%.2f,%.2f,%.2f,%u,%u\n",
+        printf("%u,%u,%u,%u,%.2f,%.2f,%.2f,%u,%u,%s\n",
                r->tx_port, r->rx_port, r->vlan_id, r->vl_id,
                min_us, avg_us, max_us,
-               r->rx_count, r->tx_count);
+               r->rx_count, r->tx_count,
+               r->passed ? "PASS" : "FAIL");
     }
 }

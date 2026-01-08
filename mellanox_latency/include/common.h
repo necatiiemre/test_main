@@ -188,6 +188,7 @@ struct latency_result {
     uint64_t total_latency_ns;  // Toplam latency (average hesabı için)
 
     bool     valid;             // Geçerli sonuç mu?
+    bool     passed;            // Latency threshold kontrolü: true = PASS, false = FAIL
     char     error_msg[64];     // Hata mesajı (varsa)
 };
 
@@ -201,6 +202,7 @@ struct test_config {
     int      timeout_ms;        // RX timeout (ms)
     int      port_filter;       // -1 = tüm portlar, 0-7 = sadece bu TX port
     bool     use_busy_wait;     // Busy-wait delay kullan
+    uint64_t max_latency_ns;    // Maximum kabul edilebilir latency (ns), 0 = kontrol etme
 };
 
 // ============================================

@@ -107,13 +107,14 @@ void print_results_table(const struct latency_result *results, int result_count,
     }
 
     // Print table
+    fflush(stdout);
     printf("\n");
 
     // Top border
     print_horizontal_line(TBL_TL, TBL_TH, TBL_TR, TBL_H);
 
     // Title
-    print_title_line("LATENCY TEST SONUCLARI (Timestamp: HARDWARE NIC)");
+    print_title_line("LATENCY TEST RESULTS (Timestamp: HARDWARE NIC)");
 
     // Header separator
     print_horizontal_line(TBL_TV, TBL_X, TBL_TVR, TBL_H);
@@ -198,6 +199,7 @@ void print_results_table(const struct latency_result *results, int result_count,
         printf("  Successful VLAN ratio: %.1f%%\n", (100.0 * successful) / result_count);
         printf("\n");
     }
+    fflush(stdout);
 }
 
 // ============================================
@@ -206,6 +208,7 @@ void print_results_table(const struct latency_result *results, int result_count,
 
 void print_results_table_with_attempt(const struct latency_result *results,
                                        int result_count, int packet_count, int attempt) {
+    fflush(stdout);
     // Statistics
     int successful = 0;
     int passed_count = 0;
@@ -333,6 +336,7 @@ void print_results_table_with_attempt(const struct latency_result *results,
         }
         printf("\n");
     }
+    fflush(stdout);
 }
 
 // ============================================

@@ -42,50 +42,62 @@ extern int g_debug_level;
 #define DEBUG_TIMESTAMP() do { \
     struct timespec _ts; \
     clock_gettime(CLOCK_MONOTONIC, &_ts); \
-    fprintf(stderr, "[%5ld.%06ld] ", _ts.tv_sec % 100000, _ts.tv_nsec / 1000); \
+    printf("[%5ld.%06ld] ", _ts.tv_sec % 100000, _ts.tv_nsec / 1000); \
 } while(0)
 
-// ERROR: Always printed (red)
+// ERROR: Always printed
 #define LOG_ERROR(fmt, ...) do { \
+    fflush(stdout); \
     DEBUG_TIMESTAMP(); \
-    fprintf(stderr, COLOR_RED "[ERROR] " COLOR_RESET fmt "\n", ##__VA_ARGS__); \
+    printf("[ERROR] " fmt "\n", ##__VA_ARGS__); \
+    fflush(stdout); \
 } while(0)
 
 // ERROR with errno
 #define LOG_ERROR_ERRNO(fmt, ...) do { \
     int _errno = errno; \
+    fflush(stdout); \
     DEBUG_TIMESTAMP(); \
-    fprintf(stderr, COLOR_RED "[ERROR] " COLOR_RESET fmt ": %s (errno=%d)\n", \
+    printf("[ERROR] " fmt ": %s (errno=%d)\n", \
             ##__VA_ARGS__, strerror(_errno), _errno); \
+    fflush(stdout); \
 } while(0)
 
-// WARNING: Always printed (yellow)
+// WARNING: Always printed
 #define LOG_WARN(fmt, ...) do { \
+    fflush(stdout); \
     DEBUG_TIMESTAMP(); \
-    fprintf(stderr, COLOR_YELLOW "[WARN]  " COLOR_RESET fmt "\n", ##__VA_ARGS__); \
+    printf("[WARN]  " fmt "\n", ##__VA_ARGS__); \
+    fflush(stdout); \
 } while(0)
 
-// INFO: Printed when debug_level >= 1 (green)
+// INFO: Printed when debug_level >= 1
 #define LOG_INFO(fmt, ...) do { \
     if (g_debug_level >= DEBUG_LEVEL_INFO) { \
+        fflush(stdout); \
         DEBUG_TIMESTAMP(); \
-        fprintf(stderr, COLOR_GREEN "[INFO]  " COLOR_RESET fmt "\n", ##__VA_ARGS__); \
+        printf("[INFO]  " fmt "\n", ##__VA_ARGS__); \
+        fflush(stdout); \
     } \
 } while(0)
 
-// DEBUG: Printed when debug_level >= 2 (cyan)
+// DEBUG: Printed when debug_level >= 2
 #define LOG_DEBUG(fmt, ...) do { \
     if (g_debug_level >= DEBUG_LEVEL_VERBOSE) { \
+        fflush(stdout); \
         DEBUG_TIMESTAMP(); \
-        fprintf(stderr, COLOR_CYAN "[DEBUG] " COLOR_RESET fmt "\n", ##__VA_ARGS__); \
+        printf("[DEBUG] " fmt "\n", ##__VA_ARGS__); \
+        fflush(stdout); \
     } \
 } while(0)
 
-// TRACE: Printed when debug_level >= 3 (magenta)
+// TRACE: Printed when debug_level >= 3
 #define LOG_TRACE(fmt, ...) do { \
     if (g_debug_level >= DEBUG_LEVEL_TRACE) { \
+        fflush(stdout); \
         DEBUG_TIMESTAMP(); \
-        fprintf(stderr, COLOR_MAGENTA "[TRACE] " COLOR_RESET fmt "\n", ##__VA_ARGS__); \
+        printf("[TRACE] " fmt "\n", ##__VA_ARGS__); \
+        fflush(stdout); \
     } \
 } while(0)
 
@@ -97,29 +109,31 @@ static inline void hex_dump(const char *desc, const void *data, size_t len) {
 
     const uint8_t *p = (const uint8_t *)data;
 
-    fprintf(stderr, COLOR_MAGENTA "[TRACE] " COLOR_RESET "HEX DUMP: %s (%zu bytes)\n", desc, len);
+    fflush(stdout);
+    printf("[TRACE] HEX DUMP: %s (%zu bytes)\n", desc, len);
 
     for (size_t i = 0; i < len; i += 16) {
-        fprintf(stderr, "  %04zx: ", i);
+        printf("  %04zx: ", i);
 
         // Hex bytes
         for (size_t j = 0; j < 16; j++) {
             if (i + j < len) {
-                fprintf(stderr, "%02x ", p[i + j]);
+                printf("%02x ", p[i + j]);
             } else {
-                fprintf(stderr, "   ");
+                printf("   ");
             }
-            if (j == 7) fprintf(stderr, " ");
+            if (j == 7) printf(" ");
         }
 
         // ASCII
-        fprintf(stderr, " |");
+        printf(" |");
         for (size_t j = 0; j < 16 && i + j < len; j++) {
             uint8_t c = p[i + j];
-            fprintf(stderr, "%c", (c >= 32 && c < 127) ? c : '.');
+            printf("%c", (c >= 32 && c < 127) ? c : '.');
         }
-        fprintf(stderr, "|\n");
+        printf("|\n");
     }
+    fflush(stdout);
 }
 
 // ============================================

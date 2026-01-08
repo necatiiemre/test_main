@@ -143,7 +143,8 @@ int main(int argc, char *argv[]) {
         .timeout_ms = DEFAULT_TIMEOUT_MS,
         .port_filter = -1,
         .use_busy_wait = false,
-        .max_latency_ns = DEFAULT_MAX_LATENCY_NS
+        .max_latency_ns = DEFAULT_MAX_LATENCY_NS,
+        .retry_count = DEFAULT_RETRY_COUNT
     };
 
     bool csv_output = false;
@@ -295,6 +296,7 @@ int main(int argc, char *argv[]) {
         printf("VLAN arasi bekleme: %d us\n", config.delay_us);
         printf("RX timeout: %d ms\n", config.timeout_ms);
         printf("Max latency threshold: %lu ns (%.1f us)\n", config.max_latency_ns, (double)config.max_latency_ns / 1000.0);
+        printf("Retry sayisi: %d\n", config.retry_count);
         printf("Port filtresi: %s\n", config.port_filter < 0 ? "hepsi" : "belirtilen");
         printf("Bekleme modu: %s\n", config.use_busy_wait ? "busy-wait" : "sleep");
         printf("Debug seviyesi: %d\n", g_debug_level);
@@ -309,10 +311,11 @@ int main(int argc, char *argv[]) {
     }
 
     int result_count = 0;
+    int attempt = 0;
 
-    // Run test
+    // Run test with retry mechanism
     LOG_INFO("Test baslatiliyor...");
-    int ret = run_latency_test(&config, g_results, &result_count);
+    int ret = run_latency_test_with_retry(&config, g_results, &result_count, &attempt);
 
     if (g_interrupted) {
         LOG_WARN("Test kesildi");
@@ -331,12 +334,13 @@ int main(int argc, char *argv[]) {
             print_results_csv(g_results, result_count);
         } else {
             // Declare function from results.c
-            extern void print_results_table(const struct latency_result *results, int result_count, int packet_count);
-            print_results_table(g_results, result_count, config.packet_count);
+            extern void print_results_table_with_attempt(const struct latency_result *results,
+                                                          int result_count, int packet_count, int attempt);
+            print_results_table_with_attempt(g_results, result_count, config.packet_count, attempt);
         }
     }
 
-    LOG_INFO("Test tamamlandi");
+    LOG_INFO("Test tamamlandi (deneme: %d)", attempt);
 
     return 0;  // cleanup() will be called by atexit
 }

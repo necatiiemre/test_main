@@ -374,3 +374,65 @@ int run_vlan_test(const struct port_pair *pair,
 
     return ret;
 }
+
+// ============================================
+// RETRY MECHANISM
+// ============================================
+
+int count_failed_results(const struct latency_result *results, int result_count) {
+    int fail_count = 0;
+    for (int i = 0; i < result_count; i++) {
+        if (!results[i].passed) {
+            fail_count++;
+        }
+    }
+    return fail_count;
+}
+
+int run_latency_test_with_retry(const struct test_config *config,
+                                struct latency_result *results,
+                                int *result_count,
+                                int *attempt_out) {
+    int max_attempts = 1 + config->retry_count;  // 1 initial + retry_count retries
+    int fail_count = 0;
+
+    for (int attempt = 1; attempt <= max_attempts && !g_interrupted; attempt++) {
+        *attempt_out = attempt;
+
+        if (attempt > 1) {
+            LOG_WARN("=== RETRY %d/%d (onceki FAIL: %d) ===",
+                    attempt - 1, config->retry_count, fail_count);
+        }
+
+        // Clear results for new attempt
+        memset(results, 0, MAX_RESULTS * sizeof(struct latency_result));
+        *result_count = 0;
+
+        // Run the test
+        int ret = run_latency_test(config, results, result_count);
+
+        if (ret < 0) {
+            LOG_ERROR("Test failed with error: %d", ret);
+            return ret;
+        }
+
+        // Count failures
+        fail_count = count_failed_results(results, *result_count);
+
+        if (fail_count == 0) {
+            LOG_INFO("Tum testler PASS (deneme %d/%d)", attempt, max_attempts);
+            return 0;  // All passed
+        }
+
+        // If this is not the last attempt, we'll retry
+        if (attempt < max_attempts) {
+            LOG_WARN("FAIL sayisi: %d, tekrar deneniyor...", fail_count);
+            // Small delay before retry
+            usleep(100000);  // 100ms
+        }
+    }
+
+    // Exhausted all retries
+    LOG_WARN("Tum denemeler tamamlandi, hala %d FAIL var", fail_count);
+    return fail_count;
+}

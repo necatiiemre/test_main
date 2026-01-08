@@ -63,4 +63,28 @@ int run_vlan_test(const struct port_pair *pair,
                   const struct test_config *config,
                   struct latency_result *result);
 
+/**
+ * Retry mekanizmalı latency testi
+ * Eğer FAIL olan testler varsa, belirtilen sayıda tekrar dener
+ *
+ * @param config        Test konfigürasyonu
+ * @param results       Sonuç dizisi (en az MAX_RESULTS eleman)
+ * @param result_count  Çıktı: geçerli sonuç sayısı
+ * @param attempt_out   Çıktı: kaçıncı denemede tamamlandı (1 = ilk deneme)
+ * @return              0 = tüm testler PASS, >0 = FAIL sayısı, <0 = hata
+ */
+int run_latency_test_with_retry(const struct test_config *config,
+                                struct latency_result *results,
+                                int *result_count,
+                                int *attempt_out);
+
+/**
+ * Sonuçlardaki FAIL sayısını hesapla
+ *
+ * @param results       Sonuç dizisi
+ * @param result_count  Sonuç sayısı
+ * @return              FAIL olan test sayısı
+ */
+int count_failed_results(const struct latency_result *results, int result_count);
+
 #endif // LATENCY_TEST_H

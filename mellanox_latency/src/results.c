@@ -201,6 +201,141 @@ void print_results_table(const struct latency_result *results, int result_count,
 }
 
 // ============================================
+// PRINT WITH ATTEMPT INFO
+// ============================================
+
+void print_results_table_with_attempt(const struct latency_result *results,
+                                       int result_count, int packet_count, int attempt) {
+    // Statistics
+    int successful = 0;
+    int passed_count = 0;
+    double total_avg_latency = 0.0;
+    double min_of_mins = 1e9;
+    double max_of_maxs = 0.0;
+
+    // Count successful and passed
+    for (int i = 0; i < result_count; i++) {
+        if (results[i].rx_count > 0) {
+            successful++;
+            double avg = ns_to_us(results[i].total_latency_ns / results[i].rx_count);
+            total_avg_latency += avg;
+
+            double min_lat = ns_to_us(results[i].min_latency_ns);
+            double max_lat = ns_to_us(results[i].max_latency_ns);
+            if (min_lat < min_of_mins) min_of_mins = min_lat;
+            if (max_lat > max_of_maxs) max_of_maxs = max_lat;
+        }
+        if (results[i].passed) {
+            passed_count++;
+        }
+    }
+
+    // Print table
+    printf("\n");
+
+    // Top border
+    print_horizontal_line(TBL_TL, TBL_TH, TBL_TR, TBL_H);
+
+    // Title with attempt info
+    char title[128];
+    if (attempt > 1) {
+        snprintf(title, sizeof(title),
+                "LATENCY TEST SONUCLARI (HW Timestamp) - Deneme %d", attempt);
+    } else {
+        snprintf(title, sizeof(title),
+                "LATENCY TEST SONUCLARI (Timestamp: HARDWARE NIC)");
+    }
+    print_title_line(title);
+
+    // Header separator
+    print_horizontal_line(TBL_TV, TBL_X, TBL_TVR, TBL_H);
+
+    // Header row
+    printf("%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s%*s%s\n",
+           TBL_V, COL_PORT, "TX Port",
+           TBL_V, COL_PORT, "RX Port",
+           TBL_V, COL_VLAN, "VLAN",
+           TBL_V, COL_VLID, "VL-ID",
+           TBL_V, COL_LAT, "Min (us)",
+           TBL_V, COL_LAT, "Avg (us)",
+           TBL_V, COL_LAT, "Max (us)",
+           TBL_V, COL_RXTX, "RX/TX",
+           TBL_V, COL_RESULT, "Result",
+           TBL_V);
+
+    // Header bottom separator
+    print_horizontal_line(TBL_TV, TBL_X, TBL_TVR, TBL_H);
+
+    // Data rows
+    for (int i = 0; i < result_count; i++) {
+        const struct latency_result *r = &results[i];
+
+        char min_str[16], avg_str[16], max_str[16], rxtx_str[16];
+        const char *result_str = r->passed ? "PASS" : "FAIL";
+
+        if (r->rx_count > 0) {
+            snprintf(min_str, sizeof(min_str), "%9.2f", ns_to_us(r->min_latency_ns));
+            snprintf(avg_str, sizeof(avg_str), "%9.2f", ns_to_us(r->total_latency_ns / r->rx_count));
+            snprintf(max_str, sizeof(max_str), "%9.2f", ns_to_us(r->max_latency_ns));
+        } else {
+            snprintf(min_str, sizeof(min_str), "%9s", "-");
+            snprintf(avg_str, sizeof(avg_str), "%9s", "-");
+            snprintf(max_str, sizeof(max_str), "%9s", "-");
+        }
+
+        snprintf(rxtx_str, sizeof(rxtx_str), "%4u/%-4u", r->rx_count, r->tx_count);
+
+        printf("%s%*u%s%*u%s%*u%s%*u%s%*s%s%*s%s%*s%s%*s%s%*s%s\n",
+               TBL_V, COL_PORT, r->tx_port,
+               TBL_V, COL_PORT, r->rx_port,
+               TBL_V, COL_VLAN, r->vlan_id,
+               TBL_V, COL_VLID, r->vl_id,
+               TBL_V, COL_LAT, min_str,
+               TBL_V, COL_LAT, avg_str,
+               TBL_V, COL_LAT, max_str,
+               TBL_V, COL_RXTX, rxtx_str,
+               TBL_V, COL_RESULT, result_str,
+               TBL_V);
+    }
+
+    // Summary separator
+    print_horizontal_line(TBL_TV, TBL_BH, TBL_TVR, TBL_H);
+
+    // Summary line with attempt info
+    char summary[128];
+    if (successful > 0) {
+        snprintf(summary, sizeof(summary),
+                "OZET: PASS %d/%d | Ort: %.2f us | Max: %.2f us | Pkt: %d | Deneme: %d",
+                passed_count, result_count,
+                total_avg_latency / successful,
+                max_of_maxs,
+                packet_count, attempt);
+    } else {
+        snprintf(summary, sizeof(summary),
+                "OZET: PASS %d/%d | Paket/VLAN: %d | Deneme: %d",
+                passed_count, result_count, packet_count, attempt);
+    }
+    print_title_line(summary);
+
+    // Bottom border
+    print_horizontal_line(TBL_BL, TBL_BH, TBL_BR, TBL_H);
+
+    printf("\n");
+
+    // Additional stats if verbose
+    if (g_debug_level >= DEBUG_LEVEL_INFO && successful > 0) {
+        printf("Ek Istatistikler:\n");
+        printf("  Minimum latency (tum VLAN'lar): %.2f us\n", min_of_mins);
+        printf("  Maximum latency (tum VLAN'lar): %.2f us\n", max_of_maxs);
+        printf("  Basarili VLAN orani: %.1f%%\n", (100.0 * successful) / result_count);
+        if (attempt > 1) {
+            printf("  Test tamamlandi (deneme %d)\n", attempt);
+        }
+        printf("\n");
+    }
+}
+
+// ============================================
 // BRIEF SUMMARY
 // ============================================
 

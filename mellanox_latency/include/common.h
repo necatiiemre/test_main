@@ -203,6 +203,7 @@ struct test_config {
     int      port_filter;       // -1 = tüm portlar, 0-7 = sadece bu TX port
     bool     use_busy_wait;     // Busy-wait delay kullan
     uint64_t max_latency_ns;    // Maximum kabul edilebilir latency (ns), 0 = kontrol etme
+    int      retry_count;       // Fail durumunda tekrar deneme sayısı
 };
 
 // ============================================

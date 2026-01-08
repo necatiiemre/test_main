@@ -322,6 +322,152 @@ bool SSHDeployer::copyFileToPath(const std::string& local_path, const std::strin
     }
 }
 
+bool SSHDeployer::fetchFile(const std::string& remote_path, const std::string& local_path) {
+    std::cout << getLogPrefix() << " Fetching " << remote_path << " -> " << local_path << std::endl;
+
+    // Create local directory if needed
+    std::filesystem::path local_dir = std::filesystem::path(local_path).parent_path();
+    if (!local_dir.empty() && !std::filesystem::exists(local_dir)) {
+        std::filesystem::create_directories(local_dir);
+        std::cout << getLogPrefix() << " Created local directory: " << local_dir.string() << std::endl;
+    }
+
+    // Build SCP command to fetch from remote
+    std::string scp_cmd = "sshpass -p '" + m_password + "' "
+                          "scp -o StrictHostKeyChecking=no "
+                          "-o ConnectTimeout=30 "
+                          + m_username + "@" + m_host + ":" + remote_path + " "
+                          + local_path;
+
+    auto result = g_systemCommand.execute(scp_cmd);
+
+    if (result.success) {
+        std::cout << getLogPrefix() << " File fetched successfully!" << std::endl;
+        return true;
+    } else {
+        std::cerr << getLogPrefix() << " File fetch failed: " << result.error << std::endl;
+        return false;
+    }
+}
+
+bool SSHDeployer::deployBuildRunAndFetchLog(const std::string& local_source_dir,
+                                             const std::string& app_name,
+                                             const std::string& run_args,
+                                             const std::string& local_log_path,
+                                             int timeout_seconds) {
+    std::cout << getLogPrefix() << " ========================================" << std::endl;
+    std::cout << getLogPrefix() << " Deploy, Build, Run & Fetch Log Pipeline" << std::endl;
+    std::cout << getLogPrefix() << " ========================================" << std::endl;
+
+    // Step 1: Resolve source path
+    std::string source_path;
+    if (std::filesystem::exists(local_source_dir)) {
+        source_path = local_source_dir;
+    } else {
+        // Try from source root
+        source_path = getSourceRoot() + "/" + local_source_dir;
+        if (!std::filesystem::exists(source_path)) {
+            std::cerr << getLogPrefix() << " Source directory not found: " << local_source_dir << std::endl;
+            return false;
+        }
+    }
+
+    std::string folder_name = std::filesystem::path(source_path).filename().string();
+    std::string executable_name = app_name.empty() ? folder_name : app_name;
+    std::string remote_project_path = m_remote_directory + "/" + folder_name;
+    std::string remote_log_path = "/tmp/" + executable_name + ".log";
+
+    std::cout << getLogPrefix() << " Source: " << source_path << std::endl;
+    std::cout << getLogPrefix() << " Remote path: " << remote_project_path << std::endl;
+    std::cout << getLogPrefix() << " Executable: " << executable_name << std::endl;
+    std::cout << getLogPrefix() << " Remote log: " << remote_log_path << std::endl;
+    std::cout << getLogPrefix() << " Local log: " << local_log_path << std::endl;
+
+    // Step 2: Test connection
+    std::cout << getLogPrefix() << " Step 1/5: Testing connection..." << std::endl;
+    if (!testConnection()) {
+        return false;
+    }
+
+    // Step 3: Copy source directory
+    std::cout << getLogPrefix() << " Step 2/5: Copying source code..." << std::endl;
+    if (!copyDirectory(source_path)) {
+        std::cerr << getLogPrefix() << " Failed to copy source directory" << std::endl;
+        return false;
+    }
+
+    // Step 4: Build
+    std::cout << getLogPrefix() << " Step 3/5: Building on remote server..." << std::endl;
+    if (!build(folder_name, executable_name, BuildSystem::AUTO)) {
+        std::cerr << getLogPrefix() << " Build failed" << std::endl;
+        return false;
+    }
+
+    // Step 5: Run with output redirected to log file (foreground, wait for completion)
+    std::cout << getLogPrefix() << " Step 4/5: Running application..." << std::endl;
+
+    // Find executable
+    std::string check_cmd = "test -f " + remote_project_path + "/" + executable_name + " && echo 'found'";
+    std::string ssh_check = buildSSHCommand(check_cmd);
+    auto check_result = g_systemCommand.execute(ssh_check);
+
+    std::string executable_path;
+    if (check_result.output.find("found") != std::string::npos) {
+        executable_path = remote_project_path + "/" + executable_name;
+    } else {
+        // Try with _app suffix
+        check_cmd = "test -f " + remote_project_path + "/" + folder_name + "_app && echo 'found'";
+        ssh_check = buildSSHCommand(check_cmd);
+        check_result = g_systemCommand.execute(ssh_check);
+        if (check_result.output.find("found") != std::string::npos) {
+            executable_path = remote_project_path + "/" + folder_name + "_app";
+            executable_name = folder_name + "_app";
+            remote_log_path = "/tmp/" + executable_name + ".log";
+        } else {
+            std::cerr << getLogPrefix() << " Executable not found!" << std::endl;
+            return false;
+        }
+    }
+
+    // Build run command with sudo and output to log file
+    std::string run_command = "cd " + remote_project_path + " && "
+                              "echo '" + m_password + "' | sudo -S " + executable_path;
+    if (!run_args.empty()) {
+        run_command += " " + run_args;
+    }
+    run_command += " 2>&1 | tee " + remote_log_path;
+
+    std::string ssh_run = buildSSHCommand(run_command);
+
+    // Execute with timeout (convert seconds to milliseconds)
+    int timeout_ms = timeout_seconds > 0 ? timeout_seconds * 1000 : 120000;
+    auto run_result = g_systemCommand.execute(ssh_run, timeout_ms);
+
+    // Show output
+    if (!run_result.output.empty()) {
+        std::cout << getLogPrefix() << " Application output:\n" << run_result.output << std::endl;
+    }
+
+    if (!run_result.success) {
+        std::cerr << getLogPrefix() << " Application execution had issues: " << run_result.error << std::endl;
+        // Continue to fetch log even if there were issues
+    }
+
+    // Step 6: Fetch log file
+    std::cout << getLogPrefix() << " Step 5/5: Fetching log file..." << std::endl;
+    if (!fetchFile(remote_log_path, local_log_path)) {
+        std::cerr << getLogPrefix() << " Warning: Could not fetch log file" << std::endl;
+        // Not a fatal error - application may have completed successfully
+    }
+
+    std::cout << getLogPrefix() << " ========================================" << std::endl;
+    std::cout << getLogPrefix() << " Pipeline completed!" << std::endl;
+    std::cout << getLogPrefix() << " Log saved to: " << local_log_path << std::endl;
+    std::cout << getLogPrefix() << " ========================================" << std::endl;
+
+    return true;
+}
+
 // ==================== Command Execution ====================
 
 bool SSHDeployer::execute(const std::string& command, std::string* output, bool use_sudo) {

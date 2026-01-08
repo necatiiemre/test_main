@@ -5,6 +5,7 @@
 #include <iostream>
 #include <unistd.h>
 #include <iomanip>
+#include <filesystem>
 
 // PSU Configuration: 28V 3.0A
 
@@ -16,6 +17,62 @@ Dtn::Dtn()
 
 Dtn::~Dtn()
 {
+}
+
+bool Dtn::ensureLogDirectories()
+{
+    try {
+        std::filesystem::create_directories(LogPaths::CMC);
+        std::filesystem::create_directories(LogPaths::VMC);
+        std::filesystem::create_directories(LogPaths::MMC);
+        std::filesystem::create_directories(LogPaths::DTN);
+        std::filesystem::create_directories(LogPaths::HSN);
+        std::cout << "DTN: Log directories created/verified" << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "DTN: Failed to create log directories: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool Dtn::runMellanoxLatencyTest(const std::string& run_args, int timeout_seconds)
+{
+    std::cout << "======================================" << std::endl;
+    std::cout << "DTN: Mellanox HW Timestamp Latency Test" << std::endl;
+    std::cout << "======================================" << std::endl;
+
+    // Ensure log directories exist
+    if (!ensureLogDirectories()) {
+        std::cerr << "DTN: Failed to create log directories!" << std::endl;
+        return false;
+    }
+
+    // Build local log path
+    std::string local_log_path = std::string(LogPaths::DTN) + "/mellanox_latency.log";
+
+    std::cout << "DTN: Run arguments: " << (run_args.empty() ? "(default)" : run_args) << std::endl;
+    std::cout << "DTN: Timeout: " << timeout_seconds << " seconds" << std::endl;
+    std::cout << "DTN: Log output: " << local_log_path << std::endl;
+
+    // Run the test using SSHDeployer
+    bool result = g_ssh_deployer_server.deployBuildRunAndFetchLog(
+        "mellanox_latency",    // Source folder (auto-resolved from source root)
+        "mellanox_latency",    // Executable name
+        run_args,               // Arguments (e.g., "-n 10 -v")
+        local_log_path,         // Local log path
+        timeout_seconds         // Timeout
+    );
+
+    if (result) {
+        std::cout << "======================================" << std::endl;
+        std::cout << "DTN: Mellanox Latency Test COMPLETED" << std::endl;
+        std::cout << "DTN: Log saved to: " << local_log_path << std::endl;
+        std::cout << "======================================" << std::endl;
+    } else {
+        std::cerr << "DTN: Mellanox Latency Test FAILED!" << std::endl;
+    }
+
+    return result;
 }
 
 bool Dtn::configureSequence()

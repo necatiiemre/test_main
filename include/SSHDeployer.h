@@ -165,6 +165,35 @@ public:
      */
     bool copyFileToPath(const std::string& local_path, const std::string& remote_path, bool use_sudo = false);
 
+    /**
+     * @brief Fetch (download) file from remote server to local path
+     * @param remote_path Full remote file path
+     * @param local_path Local destination path
+     * @return true on success
+     */
+    bool fetchFile(const std::string& remote_path, const std::string& local_path);
+
+    /**
+     * @brief Deploy, build, run application and fetch its log file
+     * @param local_source_dir Local source directory
+     * @param app_name Application name
+     * @param run_args Arguments to pass when running the application
+     * @param local_log_path Local path to save the log file
+     * @param timeout_seconds Maximum time to wait for application to complete (0 = no timeout)
+     * @return true on success
+     *
+     * This function:
+     * 1. Copies source to remote server
+     * 2. Builds the application
+     * 3. Runs it (foreground, waits for completion)
+     * 4. Fetches the log file back to local machine
+     */
+    bool deployBuildRunAndFetchLog(const std::string& local_source_dir,
+                                    const std::string& app_name,
+                                    const std::string& run_args,
+                                    const std::string& local_log_path,
+                                    int timeout_seconds = 120);
+
     // ==================== Command Execution ====================
 
     /**

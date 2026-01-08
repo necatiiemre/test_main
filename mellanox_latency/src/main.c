@@ -326,21 +326,15 @@ int main(int argc, char *argv[]) {
         return 1;  // cleanup() will be called by atexit
     }
 
-    // Print results (even if interrupted, show partial results)
-    if (result_count > 0) {
-        if (csv_output) {
-            // Declare function from results.c
-            extern void print_results_csv(const struct latency_result *results, int result_count);
-            print_results_csv(g_results, result_count);
-        } else {
-            // Declare function from results.c
-            extern void print_results_table_with_attempt(const struct latency_result *results,
-                                                          int result_count, int packet_count, int attempt);
-            print_results_table_with_attempt(g_results, result_count, config.packet_count, attempt);
-        }
+    // Print CSV results if requested (table is already printed after each attempt)
+    if (result_count > 0 && csv_output) {
+        // Declare function from results.c
+        extern void print_results_csv(const struct latency_result *results, int result_count);
+        printf("\n--- CSV EXPORT ---\n");
+        print_results_csv(g_results, result_count);
     }
 
-    LOG_INFO("Test tamamlandi (deneme: %d)", attempt);
+    LOG_INFO("Test tamamlandi (toplam deneme: %d)", attempt);
 
     return 0;  // cleanup() will be called by atexit
 }

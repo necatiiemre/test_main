@@ -22,6 +22,10 @@
 #include "common.h"
 #include "config.h"
 
+// Forward declaration for results printing (defined in results.c)
+extern void print_results_table_with_attempt(const struct latency_result *results,
+                                              int result_count, int packet_count, int attempt);
+
 // Interrupt flag (defined in main.c)
 extern volatile int g_interrupted;
 
@@ -400,8 +404,12 @@ int run_latency_test_with_retry(const struct test_config *config,
         *attempt_out = attempt;
 
         if (attempt > 1) {
+            printf("\n");
+            LOG_WARN("========================================");
             LOG_WARN("=== RETRY %d/%d (onceki FAIL: %d) ===",
                     attempt - 1, config->retry_count, fail_count);
+            LOG_WARN("========================================");
+            printf("\n");
         }
 
         // Clear results for new attempt
@@ -418,6 +426,9 @@ int run_latency_test_with_retry(const struct test_config *config,
 
         // Count failures
         fail_count = count_failed_results(results, *result_count);
+
+        // Print results table for this attempt
+        print_results_table_with_attempt(results, *result_count, config->packet_count, attempt);
 
         if (fail_count == 0) {
             LOG_INFO("Tum testler PASS (deneme %d/%d)", attempt, max_attempts);

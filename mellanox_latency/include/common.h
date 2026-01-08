@@ -147,8 +147,8 @@ static inline uint64_t get_time_ns(void) {
 // ============================================
 
 /**
- * Hassas mikrosaniye bekleme
- * clock_nanosleep() kullanır - düşük CPU kullanımı
+ * Precise microsecond delay
+ * Uses clock_nanosleep() - low CPU usage
  */
 static inline void precise_delay_us(uint32_t microseconds) {
     struct timespec ts;
@@ -158,8 +158,8 @@ static inline void precise_delay_us(uint32_t microseconds) {
 }
 
 /**
- * Hassas mikrosaniye bekleme (busy-wait versiyonu)
- * Daha yüksek hassasiyet ama CPU kullanır
+ * Precise microsecond delay (busy-wait version)
+ * Higher precision but uses CPU
  */
 static inline void precise_delay_us_busy(uint32_t microseconds) {
     uint64_t start = get_time_ns();
@@ -180,30 +180,30 @@ struct latency_result {
     uint16_t vlan_id;           // VLAN tag
     uint16_t vl_id;             // VL-ID (MAC/IP suffix)
 
-    uint32_t tx_count;          // Gönderilen paket sayısı
-    uint32_t rx_count;          // Alınan paket sayısı
+    uint32_t tx_count;          // Packets sent
+    uint32_t rx_count;          // Packets received
 
     uint64_t min_latency_ns;    // Minimum latency (nanoseconds)
     uint64_t max_latency_ns;    // Maximum latency (nanoseconds)
-    uint64_t total_latency_ns;  // Toplam latency (average hesabı için)
+    uint64_t total_latency_ns;  // Total latency (for average calculation)
 
-    bool     valid;             // Geçerli sonuç mu?
-    bool     passed;            // Latency threshold kontrolü: true = PASS, false = FAIL
-    char     error_msg[64];     // Hata mesajı (varsa)
+    bool     valid;             // Valid result?
+    bool     passed;            // Latency threshold check: true = PASS, false = FAIL
+    char     error_msg[64];     // Error message (if any)
 };
 
 // ============================================
 // TEST CONFIGURATION STRUCTURE
 // ============================================
 struct test_config {
-    int      packet_count;      // Her VLAN için paket sayısı
-    int      packet_size;       // Paket boyutu (bytes)
-    int      delay_us;          // VLAN testleri arası bekleme (µs)
+    int      packet_count;      // Packet count per VLAN
+    int      packet_size;       // Packet size (bytes)
+    int      delay_us;          // Delay between VLAN tests (µs)
     int      timeout_ms;        // RX timeout (ms)
-    int      port_filter;       // -1 = tüm portlar, 0-7 = sadece bu TX port
-    bool     use_busy_wait;     // Busy-wait delay kullan
-    uint64_t max_latency_ns;    // Maximum kabul edilebilir latency (ns), 0 = kontrol etme
-    int      retry_count;       // Fail durumunda tekrar deneme sayısı
+    int      port_filter;       // -1 = all ports, 0-7 = only this TX port
+    bool     use_busy_wait;     // Use busy-wait delay
+    uint64_t max_latency_ns;    // Maximum acceptable latency (ns), 0 = no check
+    int      retry_count;       // Retry count on failure
 };
 
 // ============================================

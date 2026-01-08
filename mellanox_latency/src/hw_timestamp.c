@@ -234,7 +234,7 @@ int create_hw_timestamp_socket(const char *if_name, socket_type_t type, struct h
 
     if (type == SOCK_TYPE_TX) {
         ts_flags |= SOF_TIMESTAMPING_TX_HARDWARE;
-        ts_flags |= SOF_TIMESTAMPING_OPT_TSONLY;  // Sadece timestamp, paket tekrarı değil
+        ts_flags |= SOF_TIMESTAMPING_OPT_TSONLY;  // Timestamp only, no packet echo
     } else {
         ts_flags |= SOF_TIMESTAMPING_RX_HARDWARE;
     }
@@ -432,7 +432,7 @@ int recv_packet_get_rx_timestamp(struct hw_socket *sock,
     // Extract timestamp
     if (!extract_timestamp_from_cmsg(&msg, rx_timestamp)) {
         LOG_WARN("No RX timestamp in message on %s", sock->if_name);
-        // Timestamp olmasa bile paket alındı, devam et
+        // Packet received even without timestamp, continue
     } else {
         LOG_DEBUG("RX timestamp for %s: %lu ns", sock->if_name, *rx_timestamp);
     }

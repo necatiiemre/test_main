@@ -2,8 +2,8 @@
  * @file config.h
  * @brief Mellanox HW Timestamp Latency Test - Configuration
  *
- * Bu dosya tüm port, VLAN, VL-ID ve timing konfigürasyonlarını içerir.
- * Bağımsız uygulama - DPDK gerektirmez.
+ * This file contains all port, VLAN, VL-ID and timing configurations.
+ * Standalone application - does not require DPDK.
  */
 
 #ifndef CONFIG_H
@@ -15,12 +15,12 @@
 // ============================================
 // TIMING CONFIGURATION
 // ============================================
-#define DEFAULT_PACKET_INTERVAL_US  32      // VLAN testleri arası bekleme (µs)
-#define DEFAULT_PACKET_COUNT        1       // Her VLAN için varsayılan paket sayısı
-#define DEFAULT_PACKET_SIZE         1518    // Varsayılan paket boyutu (bytes)
-#define DEFAULT_TIMEOUT_MS          1000    // RX timeout (milisaniye) - 1 saniye
-#define DEFAULT_MAX_LATENCY_NS      30000   // Maximum kabul edilebilir latency (nanosaniye) - 30 µs
-#define DEFAULT_RETRY_COUNT         3       // Fail durumunda tekrar deneme sayısı
+#define DEFAULT_PACKET_INTERVAL_US  32      // Delay between VLAN tests (µs)
+#define DEFAULT_PACKET_COUNT        1       // Default packet count per VLAN
+#define DEFAULT_PACKET_SIZE         1518    // Default packet size (bytes)
+#define DEFAULT_TIMEOUT_MS          1000    // RX timeout (milliseconds) - 1 second
+#define DEFAULT_MAX_LATENCY_NS      30000   // Maximum acceptable latency (nanoseconds) - 30 µs
+#define DEFAULT_RETRY_COUNT         3       // Retry count on failure
 #define MIN_PACKET_SIZE             64      // Minimum Ethernet frame
 #define MAX_PACKET_SIZE             1518    // Maximum Ethernet frame (no jumbo)
 
@@ -31,27 +31,27 @@
 #define MAX_VLANS_PER_PAIR  4
 
 /**
- * Port çifti yapısı
- * TX porttan paket gönderilir, RX porttan alınır
+ * Port pair structure
+ * Packet sent from TX port, received on RX port
  */
 struct port_pair {
     uint16_t    tx_port;                    // TX port ID (0-7)
-    const char *tx_iface;                   // TX interface adı (e.g., "ens1f0np0")
+    const char *tx_iface;                   // TX interface name (e.g., "ens1f0np0")
     uint16_t    rx_port;                    // RX port ID (0-7)
-    const char *rx_iface;                   // RX interface adı
-    uint16_t    vlans[MAX_VLANS_PER_PAIR];  // VLAN ID'leri
-    uint16_t    vl_ids[MAX_VLANS_PER_PAIR]; // VL-ID'ler (MAC/IP'nin son 2 byte'ı)
-    uint16_t    vlan_count;                 // Bu çift için VLAN sayısı
+    const char *rx_iface;                   // RX interface name
+    uint16_t    vlans[MAX_VLANS_PER_PAIR];  // VLAN IDs
+    uint16_t    vl_ids[MAX_VLANS_PER_PAIR]; // VL-IDs (last 2 bytes of MAC/IP)
+    uint16_t    vlan_count;                 // VLAN count for this pair
 };
 
 /**
- * Port çiftleri tanımı
+ * Port pairs definition
  *
- * Bağlantı şeması:
- *   Port 0 (ens2f0np0) ←→ Port 7 (ens5f1np1)
- *   Port 1 (ens2f1np1) ←→ Port 6 (ens5f0np0)
- *   Port 2 (ens1f0np0) ←→ Port 5 (ens3f1np1)
- *   Port 3 (ens1f1np1) ←→ Port 4 (ens3f0np0)
+ * Connection diagram:
+ *   Port 0 (ens2f0np0) <-> Port 7 (ens5f1np1)
+ *   Port 1 (ens2f1np1) <-> Port 6 (ens5f0np0)
+ *   Port 2 (ens1f0np0) <-> Port 5 (ens3f1np1)
+ *   Port 3 (ens1f1np1) <-> Port 4 (ens3f0np0)
  */
 static const struct port_pair g_port_pairs[NUM_PORT_PAIRS] = {
     // TX Port | TX Interface  | RX Port | RX Interface  | VLANs              | VL-IDs                    | Count
@@ -101,7 +101,7 @@ static const uint8_t g_dst_mac_prefix[4] = {0x03, 0x00, 0x00, 0x00};
 // PAYLOAD CONFIGURATION
 // ============================================
 // Payload format: [8 bytes sequence] [data...]
-#define SEQ_NUM_SIZE        8           // Sequence number boyutu (bytes)
+#define SEQ_NUM_SIZE        8           // Sequence number size (bytes)
 
 // ============================================
 // HEADER SIZES
@@ -116,9 +116,9 @@ static const uint8_t g_dst_mac_prefix[4] = {0x03, 0x00, 0x00, 0x00};
 // ============================================
 // DEBUG LEVELS
 // ============================================
-#define DEBUG_LEVEL_NONE    0           // Sadece sonuç tablosu
-#define DEBUG_LEVEL_INFO    1           // Temel bilgiler
-#define DEBUG_LEVEL_VERBOSE 2           // Detaylı bilgiler
-#define DEBUG_LEVEL_TRACE   3           // Her şey (paket hex dump dahil)
+#define DEBUG_LEVEL_NONE    0           // Results table only
+#define DEBUG_LEVEL_INFO    1           // Basic information
+#define DEBUG_LEVEL_VERBOSE 2           // Detailed information
+#define DEBUG_LEVEL_TRACE   3           // Everything (including packet hex dump)
 
 #endif // CONFIG_H

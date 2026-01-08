@@ -2,23 +2,23 @@
  * @file main.c
  * @brief Mellanox HW Timestamp Latency Test - Main Entry Point
  *
- * Komut satırı argümanlarını parse eder ve testi başlatır.
+ * Parses command line arguments and starts the test.
  *
- * Kullanım:
+ * Usage:
  *   ./mellanox_latency [options]
  *
- * Seçenekler:
- *   -n, --count <N>     Her VLAN için paket sayısı (default: 1)
- *   -s, --size <bytes>  Paket boyutu (default: 1518)
- *   -d, --delay <us>    VLAN testleri arası bekleme (default: 32)
+ * Options:
+ *   -n, --count <N>     Packet count per VLAN (default: 1)
+ *   -s, --size <bytes>  Packet size (default: 1518)
+ *   -d, --delay <us>    Delay between VLAN tests (default: 32)
  *   -T, --timeout <ms>  RX timeout (default: 5000)
- *   -p, --port <id>     Sadece bu TX port'u test et (default: hepsi)
- *   -v, --verbose       Verbose çıktı (birden fazla -v daha detaylı)
- *   -c, --csv           CSV formatında çıktı
- *   -b, --busy-wait     Hassas bekleme için busy-wait kullan
- *   -C, --check         Sadece interface kontrolü yap
- *   -I, --info          Interface HW timestamp bilgilerini göster
- *   -h, --help          Yardım
+ *   -p, --port <id>     Test only this TX port (default: all)
+ *   -v, --verbose       Verbose output (repeat for more detail)
+ *   -c, --csv           CSV format output
+ *   -b, --busy-wait     Use busy-wait for precise timing
+ *   -C, --check         Only check interfaces
+ *   -I, --info          Show interface HW timestamp info
+ *   -h, --help          Help
  */
 
 #include <stdio.h>
@@ -48,16 +48,16 @@ static struct latency_result *g_results = NULL;
 // ============================================
 
 static void cleanup(void) {
-    LOG_DEBUG("Temizlik yapiliyor...");
+    LOG_DEBUG("Cleaning up...");
 
     // Free results
     if (g_results != NULL) {
         free(g_results);
         g_results = NULL;
-        LOG_DEBUG("Sonuc bellegi serbest birakildi");
+        LOG_DEBUG("Results memory freed");
     }
 
-    LOG_DEBUG("Temizlik tamamlandi");
+    LOG_DEBUG("Cleanup completed");
 }
 
 // ============================================
@@ -79,30 +79,30 @@ static void signal_handler(int sig) {
 static void print_usage(const char *prog) {
     printf("Mellanox HW Timestamp Latency Test\n");
     printf("==================================\n\n");
-    printf("Kullanim: %s [options]\n\n", prog);
-    printf("Secenekler:\n");
-    printf("  -n, --count <N>     Her VLAN icin paket sayisi (default: %d)\n", DEFAULT_PACKET_COUNT);
-    printf("  -s, --size <bytes>  Paket boyutu (default: %d)\n", DEFAULT_PACKET_SIZE);
-    printf("  -d, --delay <us>    VLAN testleri arasi bekleme, mikrosaniye (default: %d)\n", DEFAULT_PACKET_INTERVAL_US);
-    printf("  -T, --timeout <ms>  RX timeout, milisaniye (default: %d)\n", DEFAULT_TIMEOUT_MS);
-    printf("  -p, --port <id>     Sadece bu TX port'u test et (0-7, default: hepsi)\n");
-    printf("  -v, --verbose       Verbose cikti (tekrarla: -vv, -vvv)\n");
-    printf("  -c, --csv           CSV formatinda cikti\n");
-    printf("  -b, --busy-wait     Hassas bekleme icin busy-wait kullan\n");
-    printf("  -C, --check         Sadece interface kontrolu yap\n");
-    printf("  -I, --info          Interface HW timestamp bilgilerini goster\n");
-    printf("  -h, --help          Bu yardim mesaji\n");
+    printf("Usage: %s [options]\n\n", prog);
+    printf("Options:\n");
+    printf("  -n, --count <N>     Packet count per VLAN (default: %d)\n", DEFAULT_PACKET_COUNT);
+    printf("  -s, --size <bytes>  Packet size (default: %d)\n", DEFAULT_PACKET_SIZE);
+    printf("  -d, --delay <us>    Delay between VLAN tests, microseconds (default: %d)\n", DEFAULT_PACKET_INTERVAL_US);
+    printf("  -T, --timeout <ms>  RX timeout, milliseconds (default: %d)\n", DEFAULT_TIMEOUT_MS);
+    printf("  -p, --port <id>     Test only this TX port (0-7, default: all)\n");
+    printf("  -v, --verbose       Verbose output (repeat: -vv, -vvv)\n");
+    printf("  -c, --csv           CSV format output\n");
+    printf("  -b, --busy-wait     Use busy-wait for precise timing\n");
+    printf("  -C, --check         Only check interfaces\n");
+    printf("  -I, --info          Show interface HW timestamp info\n");
+    printf("  -h, --help          This help message\n");
     printf("\n");
-    printf("Ornekler:\n");
-    printf("  %s                    Varsayilan ayarlarla test\n", prog);
-    printf("  %s -n 10              Her VLAN icin 10 paket\n", prog);
-    printf("  %s -n 10 -v           Verbose cikti ile test\n", prog);
-    printf("  %s -p 2 -n 5          Sadece Port 2 testi, 5 paket\n", prog);
-    printf("  %s -c > results.csv   CSV olarak kaydet\n", prog);
-    printf("  %s -I                 Interface bilgilerini goster\n", prog);
+    printf("Examples:\n");
+    printf("  %s                    Test with default settings\n", prog);
+    printf("  %s -n 10              10 packets per VLAN\n", prog);
+    printf("  %s -n 10 -v           Test with verbose output\n", prog);
+    printf("  %s -p 2 -n 5          Test only Port 2, 5 packets\n", prog);
+    printf("  %s -c > results.csv   Save as CSV\n", prog);
+    printf("  %s -I                 Show interface info\n", prog);
     printf("\n");
-    printf("Port Eslestirmesi:\n");
-    printf("  TX Port -> RX Port | Interface'ler        | VLAN'lar\n");
+    printf("Port Mapping:\n");
+    printf("  TX Port -> RX Port | Interfaces           | VLANs\n");
     printf("  ---------|---------|----------------------|----------\n");
     for (int i = 0; i < NUM_PORT_PAIRS; i++) {
         const struct port_pair *pp = &g_port_pairs[i];
@@ -119,8 +119,8 @@ static void print_usage(const char *prog) {
 // ============================================
 
 static void show_interface_info(void) {
-    printf("Interface HW Timestamp Bilgileri:\n");
-    printf("=================================\n\n");
+    printf("Interface HW Timestamp Information:\n");
+    printf("===================================\n\n");
 
     for (int i = 0; i < NUM_PORT_PAIRS; i++) {
         const struct port_pair *pp = &g_port_pairs[i];
@@ -174,7 +174,7 @@ int main(int argc, char *argv[]) {
             case 'n':
                 config.packet_count = atoi(optarg);
                 if (config.packet_count < 1) {
-                    fprintf(stderr, "Hata: Paket sayisi en az 1 olmali\n");
+                    fprintf(stderr, "Error: Packet count must be at least 1\n");
                     return 1;
                 }
                 break;
@@ -182,11 +182,11 @@ int main(int argc, char *argv[]) {
             case 's':
                 config.packet_size = atoi(optarg);
                 if (config.packet_size < MIN_PACKET_SIZE) {
-                    fprintf(stderr, "Hata: Paket boyutu en az %d byte olmali\n", MIN_PACKET_SIZE);
+                    fprintf(stderr, "Error: Packet size must be at least %d bytes\n", MIN_PACKET_SIZE);
                     return 1;
                 }
                 if (config.packet_size > MAX_PACKET_SIZE) {
-                    fprintf(stderr, "Hata: Paket boyutu en fazla %d byte olmali\n", MAX_PACKET_SIZE);
+                    fprintf(stderr, "Error: Packet size must be at most %d bytes\n", MAX_PACKET_SIZE);
                     return 1;
                 }
                 break;
@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
             case 'd':
                 config.delay_us = atoi(optarg);
                 if (config.delay_us < 0) {
-                    fprintf(stderr, "Hata: Bekleme suresi negatif olamaz\n");
+                    fprintf(stderr, "Error: Delay cannot be negative\n");
                     return 1;
                 }
                 break;
@@ -202,7 +202,7 @@ int main(int argc, char *argv[]) {
             case 'T':
                 config.timeout_ms = atoi(optarg);
                 if (config.timeout_ms < 100) {
-                    fprintf(stderr, "Hata: Timeout en az 100ms olmali\n");
+                    fprintf(stderr, "Error: Timeout must be at least 100ms\n");
                     return 1;
                 }
                 break;
@@ -210,7 +210,7 @@ int main(int argc, char *argv[]) {
             case 'p':
                 config.port_filter = atoi(optarg);
                 if (config.port_filter < 0 || config.port_filter > 7) {
-                    fprintf(stderr, "Hata: Port ID 0-7 arasinda olmali\n");
+                    fprintf(stderr, "Error: Port ID must be between 0-7\n");
                     return 1;
                 }
                 break;
@@ -250,7 +250,7 @@ int main(int argc, char *argv[]) {
 
     // Check root
     if (geteuid() != 0) {
-        fprintf(stderr, "Hata: Bu program root yetkisi gerektirir.\n");
+        fprintf(stderr, "Error: This program requires root privileges.\n");
         fprintf(stderr, "       sudo %s ...\n", argv[0]);
         return 1;
     }
@@ -269,21 +269,21 @@ int main(int argc, char *argv[]) {
     }
 
     // Check interfaces
-    LOG_INFO("Interface kontrolu yapiliyor...");
+    LOG_INFO("Checking interfaces...");
     int check_ret = check_all_interfaces();
 
     if (check_only) {
         if (check_ret == 0) {
-            printf("Tum interface'ler HW timestamp destekliyor.\n");
+            printf("All interfaces support HW timestamp.\n");
             return 0;
         } else {
-            printf("Bazi interface'ler HW timestamp desteklemiyor!\n");
+            printf("Some interfaces do not support HW timestamp!\n");
             return 1;
         }
     }
 
     if (check_ret < 0) {
-        LOG_WARN("Bazi interface'ler HW timestamp desteklemiyor, devam ediliyor...");
+        LOG_WARN("Some interfaces do not support HW timestamp, continuing...");
     }
 
     // Print config
@@ -291,22 +291,22 @@ int main(int argc, char *argv[]) {
         printf("\n");
         printf("Mellanox HW Timestamp Latency Test\n");
         printf("==================================\n");
-        printf("Paket sayisi (VLAN basina): %d\n", config.packet_count);
-        printf("Paket boyutu: %d bytes\n", config.packet_size);
-        printf("VLAN arasi bekleme: %d us\n", config.delay_us);
+        printf("Packet count (per VLAN): %d\n", config.packet_count);
+        printf("Packet size: %d bytes\n", config.packet_size);
+        printf("Inter-VLAN delay: %d us\n", config.delay_us);
         printf("RX timeout: %d ms\n", config.timeout_ms);
         printf("Max latency threshold: %lu ns (%.1f us)\n", config.max_latency_ns, (double)config.max_latency_ns / 1000.0);
-        printf("Retry sayisi: %d\n", config.retry_count);
-        printf("Port filtresi: %s\n", config.port_filter < 0 ? "hepsi" : "belirtilen");
-        printf("Bekleme modu: %s\n", config.use_busy_wait ? "busy-wait" : "sleep");
-        printf("Debug seviyesi: %d\n", g_debug_level);
+        printf("Retry count: %d\n", config.retry_count);
+        printf("Port filter: %s\n", config.port_filter < 0 ? "all" : "specified");
+        printf("Wait mode: %s\n", config.use_busy_wait ? "busy-wait" : "sleep");
+        printf("Debug level: %d\n", g_debug_level);
         printf("\n");
     }
 
     // Allocate results (use global pointer for cleanup)
     g_results = calloc(MAX_RESULTS, sizeof(struct latency_result));
     if (!g_results) {
-        LOG_ERROR("Sonuc dizisi icin bellek ayrilamadi");
+        LOG_ERROR("Failed to allocate memory for results");
         return 1;
     }
 
@@ -314,15 +314,15 @@ int main(int argc, char *argv[]) {
     int attempt = 0;
 
     // Run test with retry mechanism
-    LOG_INFO("Test baslatiliyor...");
+    LOG_INFO("Starting test...");
     int ret = run_latency_test_with_retry(&config, g_results, &result_count, &attempt);
 
     if (g_interrupted) {
-        LOG_WARN("Test kesildi");
+        LOG_WARN("Test interrupted");
     }
 
     if (ret < 0 && !g_interrupted) {
-        LOG_ERROR("Test basarisiz: %d", ret);
+        LOG_ERROR("Test failed: %d", ret);
         return 1;  // cleanup() will be called by atexit
     }
 
@@ -334,7 +334,7 @@ int main(int argc, char *argv[]) {
         print_results_csv(g_results, result_count);
     }
 
-    LOG_INFO("Test tamamlandi (toplam deneme: %d)", attempt);
+    LOG_INFO("Test completed (total attempts: %d)", attempt);
 
     return 0;  // cleanup() will be called by atexit
 }

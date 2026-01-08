@@ -173,14 +173,14 @@ void print_results_table(const struct latency_result *results, int result_count,
     char summary[128];
     if (successful > 0) {
         snprintf(summary, sizeof(summary),
-                "OZET: PASS %d/%d | Ort: %.2f us | Max: %.2f us | Paket/VLAN: %d",
+                "SUMMARY: PASS %d/%d | Avg: %.2f us | Max: %.2f us | Packets/VLAN: %d",
                 passed_count, result_count,
                 total_avg_latency / successful,
                 max_of_maxs,
                 packet_count);
     } else {
         snprintf(summary, sizeof(summary),
-                "OZET: PASS %d/%d | Paket/VLAN: %d",
+                "SUMMARY: PASS %d/%d | Packets/VLAN: %d",
                 passed_count, result_count, packet_count);
     }
     print_title_line(summary);
@@ -192,10 +192,10 @@ void print_results_table(const struct latency_result *results, int result_count,
 
     // Additional stats if verbose
     if (g_debug_level >= DEBUG_LEVEL_INFO && successful > 0) {
-        printf("Ek Istatistikler:\n");
-        printf("  Minimum latency (tum VLAN'lar): %.2f us\n", min_of_mins);
-        printf("  Maximum latency (tum VLAN'lar): %.2f us\n", max_of_maxs);
-        printf("  Basarili VLAN orani: %.1f%%\n", (100.0 * successful) / result_count);
+        printf("Additional Statistics:\n");
+        printf("  Minimum latency (all VLANs): %.2f us\n", min_of_mins);
+        printf("  Maximum latency (all VLANs): %.2f us\n", max_of_maxs);
+        printf("  Successful VLAN ratio: %.1f%%\n", (100.0 * successful) / result_count);
         printf("\n");
     }
 }
@@ -240,10 +240,10 @@ void print_results_table_with_attempt(const struct latency_result *results,
     char title[128];
     if (attempt > 1) {
         snprintf(title, sizeof(title),
-                "LATENCY TEST SONUCLARI (HW Timestamp) - Deneme %d", attempt);
+                "LATENCY TEST RESULTS (HW Timestamp) - Attempt %d", attempt);
     } else {
         snprintf(title, sizeof(title),
-                "LATENCY TEST SONUCLARI (Timestamp: HARDWARE NIC)");
+                "LATENCY TEST RESULTS (Timestamp: HARDWARE NIC)");
     }
     print_title_line(title);
 
@@ -305,14 +305,14 @@ void print_results_table_with_attempt(const struct latency_result *results,
     char summary[128];
     if (successful > 0) {
         snprintf(summary, sizeof(summary),
-                "OZET: PASS %d/%d | Ort: %.2f us | Max: %.2f us | Pkt: %d | Deneme: %d",
+                "SUMMARY: PASS %d/%d | Avg: %.2f us | Max: %.2f us | Pkt: %d | Attempt: %d",
                 passed_count, result_count,
                 total_avg_latency / successful,
                 max_of_maxs,
                 packet_count, attempt);
     } else {
         snprintf(summary, sizeof(summary),
-                "OZET: PASS %d/%d | Paket/VLAN: %d | Deneme: %d",
+                "SUMMARY: PASS %d/%d | Packets/VLAN: %d | Attempt: %d",
                 passed_count, result_count, packet_count, attempt);
     }
     print_title_line(summary);
@@ -324,12 +324,12 @@ void print_results_table_with_attempt(const struct latency_result *results,
 
     // Additional stats if verbose
     if (g_debug_level >= DEBUG_LEVEL_INFO && successful > 0) {
-        printf("Ek Istatistikler:\n");
-        printf("  Minimum latency (tum VLAN'lar): %.2f us\n", min_of_mins);
-        printf("  Maximum latency (tum VLAN'lar): %.2f us\n", max_of_maxs);
-        printf("  Basarili VLAN orani: %.1f%%\n", (100.0 * successful) / result_count);
+        printf("Additional Statistics:\n");
+        printf("  Minimum latency (all VLANs): %.2f us\n", min_of_mins);
+        printf("  Maximum latency (all VLANs): %.2f us\n", max_of_maxs);
+        printf("  Successful VLAN ratio: %.1f%%\n", (100.0 * successful) / result_count);
         if (attempt > 1) {
-            printf("  Test tamamlandi (deneme %d)\n", attempt);
+            printf("  Test completed (attempt %d)\n", attempt);
         }
         printf("\n");
     }
@@ -353,15 +353,15 @@ void print_brief_summary(const struct latency_result *results, int result_count)
         }
     }
 
-    printf("\n=== OZET ===\n");
-    printf("Toplam VLAN: %d\n", result_count);
-    printf("Basarili: %d (%.1f%%)\n", successful, (100.0 * successful) / result_count);
-    printf("Toplam TX: %d paket\n", total_tx);
-    printf("Toplam RX: %d paket (%.1f%%)\n", total_rx, total_tx > 0 ? (100.0 * total_rx) / total_tx : 0.0);
+    printf("\n=== SUMMARY ===\n");
+    printf("Total VLANs: %d\n", result_count);
+    printf("Successful: %d (%.1f%%)\n", successful, (100.0 * successful) / result_count);
+    printf("Total TX: %d packets\n", total_tx);
+    printf("Total RX: %d packets (%.1f%%)\n", total_rx, total_tx > 0 ? (100.0 * total_rx) / total_tx : 0.0);
     if (successful > 0) {
-        printf("Ortalama Latency: %.2f us\n", total_latency / successful);
+        printf("Average Latency: %.2f us\n", total_latency / successful);
     }
-    printf("============\n\n");
+    printf("===============\n\n");
 }
 
 // ============================================

@@ -406,7 +406,7 @@ int run_latency_test_with_retry(const struct test_config *config,
         if (attempt > 1) {
             printf("\n");
             LOG_WARN("========================================");
-            LOG_WARN("=== RETRY %d/%d (onceki FAIL: %d) ===",
+            LOG_WARN("=== RETRY %d/%d (previous FAIL: %d) ===",
                     attempt - 1, config->retry_count, fail_count);
             LOG_WARN("========================================");
             printf("\n");
@@ -431,19 +431,19 @@ int run_latency_test_with_retry(const struct test_config *config,
         print_results_table_with_attempt(results, *result_count, config->packet_count, attempt);
 
         if (fail_count == 0) {
-            LOG_INFO("Tum testler PASS (deneme %d/%d)", attempt, max_attempts);
+            LOG_INFO("All tests PASS (attempt %d/%d)", attempt, max_attempts);
             return 0;  // All passed
         }
 
         // If this is not the last attempt, we'll retry
         if (attempt < max_attempts) {
-            LOG_WARN("FAIL sayisi: %d, tekrar deneniyor...", fail_count);
+            LOG_WARN("FAIL count: %d, retrying...", fail_count);
             // Small delay before retry
             usleep(100000);  // 100ms
         }
     }
 
     // Exhausted all retries
-    LOG_WARN("Tum denemeler tamamlandi, hala %d FAIL var", fail_count);
+    LOG_WARN("All attempts completed, still %d FAIL remaining", fail_count);
     return fail_count;
 }

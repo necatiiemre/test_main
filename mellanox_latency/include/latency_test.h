@@ -19,44 +19,44 @@
 // ============================================
 
 /**
- * Tüm interface'lerin HW timestamp desteğini kontrol et
+ * Check HW timestamp support for all interfaces
  *
- * @return  0 = hepsi destekliyor, <0 = bazıları desteklemiyor
+ * @return  0 = all supported, <0 = some not supported
  */
 int check_all_interfaces(void);
 
 /**
- * Latency testini çalıştır
+ * Run latency test
  *
- * @param config    Test konfigürasyonu
- * @param results   Sonuç dizisi (en az MAX_RESULTS eleman)
- * @param result_count  Çıktı: geçerli sonuç sayısı
- * @return          0 = başarılı, <0 = hata
+ * @param config    Test configuration
+ * @param results   Results array (at least MAX_RESULTS elements)
+ * @param result_count  Output: valid result count
+ * @return          0 = success, <0 = error
  */
 int run_latency_test(const struct test_config *config,
                      struct latency_result *results,
                      int *result_count);
 
 /**
- * Tek bir port çifti için test çalıştır
+ * Run test for a single port pair
  *
- * @param pair      Port çifti
- * @param config    Test konfigürasyonu
- * @param results   Sonuç dizisi (en az pair->vlan_count eleman)
- * @return          0 = başarılı, <0 = hata
+ * @param pair      Port pair
+ * @param config    Test configuration
+ * @param results   Results array (at least pair->vlan_count elements)
+ * @return          0 = success, <0 = error
  */
 int run_port_pair_test(const struct port_pair *pair,
                        const struct test_config *config,
                        struct latency_result *results);
 
 /**
- * Tek bir VLAN için test çalıştır
+ * Run test for a single VLAN
  *
- * @param pair      Port çifti
- * @param vlan_idx  VLAN indexi (0-3)
- * @param config    Test konfigürasyonu
- * @param result    Sonuç
- * @return          0 = başarılı, <0 = hata
+ * @param pair      Port pair
+ * @param vlan_idx  VLAN index (0-3)
+ * @param config    Test configuration
+ * @param result    Result
+ * @return          0 = success, <0 = error
  */
 int run_vlan_test(const struct port_pair *pair,
                   int vlan_idx,
@@ -64,14 +64,14 @@ int run_vlan_test(const struct port_pair *pair,
                   struct latency_result *result);
 
 /**
- * Retry mekanizmalı latency testi
- * Eğer FAIL olan testler varsa, belirtilen sayıda tekrar dener
+ * Latency test with retry mechanism
+ * If there are failed tests, retries the specified number of times
  *
- * @param config        Test konfigürasyonu
- * @param results       Sonuç dizisi (en az MAX_RESULTS eleman)
- * @param result_count  Çıktı: geçerli sonuç sayısı
- * @param attempt_out   Çıktı: kaçıncı denemede tamamlandı (1 = ilk deneme)
- * @return              0 = tüm testler PASS, >0 = FAIL sayısı, <0 = hata
+ * @param config        Test configuration
+ * @param results       Results array (at least MAX_RESULTS elements)
+ * @param result_count  Output: valid result count
+ * @param attempt_out   Output: which attempt completed (1 = first attempt)
+ * @return              0 = all tests PASS, >0 = FAIL count, <0 = error
  */
 int run_latency_test_with_retry(const struct test_config *config,
                                 struct latency_result *results,
@@ -79,11 +79,11 @@ int run_latency_test_with_retry(const struct test_config *config,
                                 int *attempt_out);
 
 /**
- * Sonuçlardaki FAIL sayısını hesapla
+ * Count FAIL results
  *
- * @param results       Sonuç dizisi
- * @param result_count  Sonuç sayısı
- * @return              FAIL olan test sayısı
+ * @param results       Results array
+ * @param result_count  Result count
+ * @return              Number of failed tests
  */
 int count_failed_results(const struct latency_result *results, int result_count);
 

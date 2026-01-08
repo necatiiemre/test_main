@@ -18,7 +18,7 @@
 #define DEFAULT_PACKET_INTERVAL_US  32      // Delay between VLAN tests (µs)
 #define DEFAULT_PACKET_COUNT        1       // Default packet count per VLAN
 #define DEFAULT_PACKET_SIZE         1518    // Default packet size (bytes)
-#define DEFAULT_TIMEOUT_MS          1000    // RX timeout (milliseconds) - 1 second
+#define DEFAULT_TIMEOUT_MS          1       // RX timeout (milliseconds) - 1 ms
 #define DEFAULT_MAX_LATENCY_NS      30000   // Maximum acceptable latency (nanoseconds) - 30 µs
 #define DEFAULT_RETRY_COUNT         3       // Retry count on failure
 #define MIN_PACKET_SIZE             64      // Minimum Ethernet frame

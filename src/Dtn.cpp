@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <iomanip>
 #include <filesystem>
+#include <limits>
 
 // PSU Configuration: 28V 3.0A
 
@@ -17,6 +18,32 @@ Dtn::Dtn()
 
 Dtn::~Dtn()
 {
+}
+
+bool Dtn::askYesNo(const std::string& question)
+{
+    char response;
+    while (true) {
+        std::cout << question << " [y/n]: ";
+        std::cin >> response;
+
+        if (std::cin.fail()) {
+            std::cin.clear();
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            std::cout << "Invalid input! Please enter 'y' or 'n'.\n";
+            continue;
+        }
+
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+        if (response == 'y' || response == 'Y') {
+            return true;
+        } else if (response == 'n' || response == 'N') {
+            return false;
+        } else {
+            std::cout << "Invalid input! Please enter 'y' or 'n'.\n";
+        }
+    }
 }
 
 bool Dtn::ensureLogDirectories()
@@ -188,6 +215,11 @@ bool Dtn::configureSequence()
 
     // DPDK başladı, şimdi istediğin işlemleri yap
     // sleep(360);
+
+    // Ask user if they want to run Mellanox latency test
+    if (askYesNo("Do you want to run Mellanox HW Timestamp Latency Test (14us)")) {
+        runMellanoxLatencyTest();
+    }
 
     utils::waitForCtrlC();
 

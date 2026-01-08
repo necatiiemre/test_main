@@ -30,6 +30,13 @@ private:
      */
     bool ensureLogDirectories();
 
+    /**
+     * @brief Ask user a yes/no question
+     * @param question The question to ask
+     * @return true if user answered yes, false otherwise
+     */
+    bool askYesNo(const std::string& question);
+
 public:
     Dtn();
     ~Dtn();

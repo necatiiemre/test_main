@@ -11,14 +11,19 @@
 
 /**
  * @brief Log directory paths for different subsystems
+ * @note Paths are relative to PROJECT_ROOT (defined at compile-time via CMake)
  */
+#ifndef PROJECT_ROOT
+    #define PROJECT_ROOT "."
+#endif
+
 namespace LogPaths {
-    constexpr const char* BASE_DIR = "LOGS";
-    constexpr const char* CMC = "LOGS/CMC";
-    constexpr const char* VMC = "LOGS/VMC";
-    constexpr const char* MMC = "LOGS/MMC";
-    constexpr const char* DTN = "LOGS/DTN";
-    constexpr const char* HSN = "LOGS/HSN";
+    inline std::string baseDir()  { return std::string(PROJECT_ROOT) + "/LOGS"; }
+    inline std::string CMC()      { return baseDir() + "/CMC"; }
+    inline std::string VMC()      { return baseDir() + "/VMC"; }
+    inline std::string MMC()      { return baseDir() + "/MMC"; }
+    inline std::string DTN()      { return baseDir() + "/DTN"; }
+    inline std::string HSN()      { return baseDir() + "/HSN"; }
 }
 
 class Dtn

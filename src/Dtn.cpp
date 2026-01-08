@@ -84,12 +84,12 @@ bool Dtn::ensureLogDirectories()
 {
     try
     {
-        std::filesystem::create_directories(LogPaths::CMC);
-        std::filesystem::create_directories(LogPaths::VMC);
-        std::filesystem::create_directories(LogPaths::MMC);
-        std::filesystem::create_directories(LogPaths::DTN);
-        std::filesystem::create_directories(LogPaths::HSN);
-        std::cout << "DTN: Log directories created/verified" << std::endl;
+        std::filesystem::create_directories(LogPaths::CMC());
+        std::filesystem::create_directories(LogPaths::VMC());
+        std::filesystem::create_directories(LogPaths::MMC());
+        std::filesystem::create_directories(LogPaths::DTN());
+        std::filesystem::create_directories(LogPaths::HSN());
+        std::cout << "DTN: Log directories created/verified at " << LogPaths::baseDir() << std::endl;
         return true;
     }
     catch (const std::exception &e)
@@ -113,7 +113,7 @@ bool Dtn::runMellanoxLatencyTest(const std::string &run_args, int timeout_second
     }
 
     // Build local log path
-    std::string local_log_path = std::string(LogPaths::DTN) + "/mellanox_latency.log";
+    std::string local_log_path = LogPaths::DTN() + "/mellanox_latency.log";
 
     std::cout << "DTN: Run arguments: " << (run_args.empty() ? "(default)" : run_args) << std::endl;
     std::cout << "DTN: Timeout: " << timeout_seconds << " seconds" << std::endl;

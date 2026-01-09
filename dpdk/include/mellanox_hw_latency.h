@@ -208,4 +208,187 @@ double get_global_avg_latency_us(void);
  */
 bool is_latency_test_passed(void);
 
+// ============================================
+// DUAL-TEST SYSTEM: LOOPBACK + UNIT TEST
+// ============================================
+
+/**
+ * Unit Test Port Mapping (cross-port through switch)
+ * TX Port -> RX Port
+ */
+#define MLX_UNIT_TEST_RX_PORT(tx_port) ((tx_port) ^ 1)
+// Port 0 -> 1, Port 1 -> 0
+// Port 2 -> 3, Port 3 -> 2
+// Port 4 -> 5, Port 5 -> 4
+// Port 6 -> 7, Port 7 -> 6
+
+/**
+ * Per-port latency result for Loopback/Unit tests
+ */
+struct mlx_port_test_result {
+    uint16_t port_id;           // Port ID (0-7)
+    bool     tested;            // Was this port tested?
+    bool     passed;            // Did all VLANs pass?
+
+    double   min_latency_us;    // Minimum latency (microseconds)
+    double   avg_latency_us;    // Average latency (microseconds)
+    double   max_latency_us;    // Maximum latency (microseconds)
+
+    uint32_t tx_count;          // Packets sent
+    uint32_t rx_count;          // Packets received
+    uint16_t vlan_count;        // VLANs tested
+    uint16_t passed_count;      // VLANs passed
+};
+
+/**
+ * Loopback Test Result
+ * Stores per-port NIC latency (direct cable loopback)
+ */
+struct mlx_loopback_result {
+    bool     test_completed;    // Test completed?
+    bool     test_passed;       // All ports passed?
+    bool     used_default;      // Used default 14us (test skipped)?
+
+    double   global_avg_us;     // Global average latency
+
+    // Per-port results
+    struct mlx_port_test_result ports[MLX_MAX_PORT_PAIRS];
+    uint16_t port_count;        // Number of ports tested
+};
+
+/**
+ * Unit Test Result
+ * Stores per-port end-to-end latency (through switch)
+ */
+struct mlx_unit_result {
+    bool     test_completed;    // Test completed?
+    bool     test_passed;       // All ports passed?
+
+    double   global_avg_us;     // Global average latency
+
+    // Per-port results (includes switch latency)
+    struct mlx_port_test_result ports[MLX_MAX_PORT_PAIRS];
+    uint16_t port_count;        // Number of ports tested
+};
+
+/**
+ * Combined Latency Result
+ * Contains raw unit latency, loopback latency, and net latency
+ * NET = UNIT - LOOPBACK (pure switch/unit latency)
+ */
+struct mlx_combined_result {
+    bool     loopback_completed;    // Loopback test done?
+    bool     unit_completed;        // Unit test done?
+    bool     loopback_used_default; // Used default 14us?
+
+    // Global statistics
+    double   global_loopback_us;    // Global loopback avg
+    double   global_unit_us;        // Global unit avg
+    double   global_net_us;         // Global net avg (unit - loopback)
+
+    // Per-port combined results
+    struct {
+        uint16_t port_id;
+        bool     valid;             // Has valid data?
+
+        double   loopback_us;       // Loopback latency (NIC only)
+        double   unit_us;           // Unit latency (NIC + switch)
+        double   net_us;            // Net latency (switch only)
+    } ports[MLX_MAX_PORT_PAIRS];
+
+    uint16_t port_count;
+};
+
+// ============================================
+// GLOBAL VARIABLES FOR DUAL-TEST SYSTEM
+// ============================================
+
+extern struct mlx_loopback_result g_loopback_result;
+extern struct mlx_unit_result g_unit_result;
+extern struct mlx_combined_result g_combined_result;
+
+// ============================================
+// DUAL-TEST FUNCTION DECLARATIONS
+// ============================================
+
+/**
+ * Run Loopback Test (optional)
+ * Measures NIC latency with direct cable loopback
+ *
+ * @param packet_count  Packets per VLAN
+ * @param verbose       Verbose level
+ * @return              0 = success, <0 = error
+ */
+int run_loopback_test(int packet_count, int verbose);
+
+/**
+ * Skip Loopback Test and use default latency
+ * Sets all ports to MLX_DEFAULT_LOOPBACK_LATENCY_US (14.0 us)
+ */
+void skip_loopback_test_use_default(void);
+
+/**
+ * Run Unit Test (always runs)
+ * Measures end-to-end latency through switch
+ * Uses cross-port mapping: 0↔1, 2↔3, 4↔5, 6↔7
+ *
+ * @param packet_count  Packets per VLAN
+ * @param verbose       Verbose level
+ * @return              0 = success, <0 = error
+ */
+int run_unit_test(int packet_count, int verbose);
+
+/**
+ * Calculate combined/net latency results
+ * Must be called after loopback (or skip) and unit tests
+ * Populates g_combined_result with:
+ *   - loopback_us: from loopback test or default 14us
+ *   - unit_us: from unit test
+ *   - net_us: unit_us - loopback_us
+ */
+void calculate_combined_latency(void);
+
+/**
+ * Interactive loopback test flow
+ * Asks user if they want loopback test, handles cable check
+ *
+ * @param packet_count  Packets per VLAN
+ * @param verbose       Verbose level
+ * @return              true if loopback test was run, false if skipped
+ */
+bool interactive_loopback_test(int packet_count, int verbose);
+
+/**
+ * Run complete latency test sequence
+ * 1. Interactive loopback test (optional)
+ * 2. Unit test (always)
+ * 3. Calculate combined results
+ *
+ * @param packet_count  Packets per VLAN
+ * @param verbose       Verbose level
+ * @return              0 = success, <0 = error
+ */
+int run_complete_latency_test(int packet_count, int verbose);
+
+/**
+ * Print combined latency results
+ * Shows loopback, unit, and net latency per port
+ */
+void print_combined_latency_summary(void);
+
+/**
+ * Get net latency for a specific port
+ *
+ * @param port_id   Port ID (0-7)
+ * @return          Net latency in microseconds, -1.0 if not available
+ */
+double get_port_net_latency_us(uint16_t port_id);
+
+/**
+ * Get global net latency average
+ *
+ * @return          Global net latency in microseconds, -1.0 if not available
+ */
+double get_global_net_latency_us(void);
+
 #endif // MELLANOX_HW_LATENCY_H

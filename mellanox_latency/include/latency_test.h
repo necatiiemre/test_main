@@ -87,4 +87,20 @@ int run_latency_test_with_retry(const struct test_config *config,
  */
 int count_failed_results(const struct latency_result *results, int result_count);
 
+/**
+ * Run latency test in UNIT mode (cross-port through switch)
+ * Uses port mapping: 0↔1, 2↔3, 4↔5, 6↔7
+ * TX port sends, adjacent port receives (through switch)
+ *
+ * @param config        Test configuration
+ * @param results       Results array (at least MAX_RESULTS elements)
+ * @param result_count  Output: valid result count
+ * @param attempt_out   Output: which attempt completed
+ * @return              0 = all tests PASS, >0 = FAIL count, <0 = error
+ */
+int run_latency_test_unit_mode(const struct test_config *config,
+                                struct latency_result *results,
+                                int *result_count,
+                                int *attempt_out);
+
 #endif // LATENCY_TEST_H

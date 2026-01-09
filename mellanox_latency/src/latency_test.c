@@ -447,3 +447,213 @@ int run_latency_test_with_retry(const struct test_config *config,
     LOG_WARN("All attempts completed, still %d FAIL remaining", fail_count);
     return fail_count;
 }
+
+// ============================================
+// UNIT TEST MODE (Cross-port through switch)
+// Port mapping: 0↔1, 2↔3, 4↔5, 6↔7
+// ============================================
+
+/**
+ * Get the adjacent port for unit test mode
+ * Port 0 <-> 1, Port 2 <-> 3, Port 4 <-> 5, Port 6 <-> 7
+ */
+static uint16_t get_unit_test_rx_port(uint16_t tx_port) {
+    return tx_port ^ 1;  // XOR with 1 to get adjacent port
+}
+
+/**
+ * Get interface name for a given port
+ */
+static const char* get_interface_for_port(uint16_t port) {
+    for (int i = 0; i < NUM_PORT_PAIRS; i++) {
+        if (g_port_pairs[i].tx_port == port) {
+            return g_port_pairs[i].tx_iface;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Run unit test for a single port pair in cross-port mode
+ */
+static int run_unit_test_port_pair(
+    uint16_t tx_port,
+    const char *tx_iface,
+    uint16_t rx_port,
+    const char *rx_iface,
+    const uint16_t *vlans,
+    const uint16_t *vl_ids,
+    uint16_t vlan_count,
+    const struct test_config *config,
+    struct latency_result *results)
+{
+    LOG_INFO("Unit Test: Port %d (%s) -> Port %d (%s)",
+            tx_port, tx_iface, rx_port, rx_iface);
+
+    // Open sockets
+    struct hw_socket tx_sock, rx_sock;
+
+    int ret = create_hw_timestamp_socket(tx_iface, SOCK_TYPE_TX, &tx_sock);
+    if (ret < 0) {
+        LOG_ERROR("Failed to create TX socket for %s: %d", tx_iface, ret);
+        for (int v = 0; v < vlan_count; v++) {
+            memset(&results[v], 0, sizeof(results[v]));
+            results[v].tx_port = tx_port;
+            results[v].rx_port = rx_port;
+            results[v].vlan_id = vlans[v];
+            results[v].vl_id = vl_ids[v];
+            snprintf(results[v].error_msg, sizeof(results[v].error_msg), "TX socket error");
+        }
+        return -1;
+    }
+
+    ret = create_hw_timestamp_socket(rx_iface, SOCK_TYPE_RX, &rx_sock);
+    if (ret < 0) {
+        LOG_ERROR("Failed to create RX socket for %s: %d", rx_iface, ret);
+        close_hw_timestamp_socket(&tx_sock);
+        for (int v = 0; v < vlan_count; v++) {
+            memset(&results[v], 0, sizeof(results[v]));
+            results[v].tx_port = tx_port;
+            results[v].rx_port = rx_port;
+            results[v].vlan_id = vlans[v];
+            results[v].vl_id = vl_ids[v];
+            snprintf(results[v].error_msg, sizeof(results[v].error_msg), "RX socket error");
+        }
+        return -2;
+    }
+
+    // Small delay to let sockets initialize
+    usleep(10000);  // 10ms
+    LOG_DEBUG("Sockets ready for unit test");
+
+    // Test each VLAN
+    for (int v = 0; v < vlan_count && !g_interrupted; v++) {
+        // Note: We use the same function but with different TX/RX port mapping
+        run_single_vlan_test(
+            &tx_sock, &rx_sock,
+            tx_port, rx_port,
+            vlans[v], vl_ids[v],
+            config, &results[v]);
+
+        // Delay between VLAN tests
+        if (v < vlan_count - 1 && !g_interrupted) {
+            if (config->use_busy_wait) {
+                precise_delay_us_busy(config->delay_us);
+            } else {
+                precise_delay_us(config->delay_us);
+            }
+        }
+    }
+
+    // Close sockets
+    close_hw_timestamp_socket(&tx_sock);
+    close_hw_timestamp_socket(&rx_sock);
+
+    return 0;
+}
+
+/**
+ * Run latency test in unit mode (cross-port)
+ */
+static int run_latency_test_unit(const struct test_config *config,
+                                  struct latency_result *results,
+                                  int *result_count) {
+    LOG_INFO("Starting UNIT TEST (cross-port mode)...");
+    LOG_INFO("  Port mapping: 0↔1, 2↔3, 4↔5, 6↔7");
+    LOG_INFO("  Packet count per VLAN: %d", config->packet_count);
+
+    *result_count = 0;
+
+    // Test each port with cross-port RX mapping
+    for (int p = 0; p < NUM_PORT_PAIRS && !g_interrupted; p++) {
+        const struct port_pair *pair = &g_port_pairs[p];
+        uint16_t tx_port = pair->tx_port;
+
+        // Port filter
+        if (config->port_filter >= 0 && tx_port != config->port_filter) {
+            LOG_DEBUG("Skipping port %d (filter=%d)", tx_port, config->port_filter);
+            continue;
+        }
+
+        // Get cross-port RX (unit test mode)
+        uint16_t rx_port = get_unit_test_rx_port(tx_port);
+        const char *rx_iface = get_interface_for_port(rx_port);
+
+        if (rx_iface == NULL) {
+            LOG_ERROR("Cannot find interface for RX port %d", rx_port);
+            continue;
+        }
+
+        run_unit_test_port_pair(
+            tx_port, pair->tx_iface,
+            rx_port, rx_iface,
+            pair->vlans, pair->vl_ids, pair->vlan_count,
+            config, &results[*result_count]);
+
+        *result_count += pair->vlan_count;
+
+        // Delay between port pairs
+        if (p < NUM_PORT_PAIRS - 1 && !g_interrupted) {
+            if (config->use_busy_wait) {
+                precise_delay_us_busy(config->delay_us);
+            } else {
+                precise_delay_us(config->delay_us);
+            }
+        }
+    }
+
+    LOG_INFO("Unit test completed. Total results: %d", *result_count);
+    return 0;
+}
+
+int run_latency_test_unit_mode(const struct test_config *config,
+                                struct latency_result *results,
+                                int *result_count,
+                                int *attempt_out) {
+    int max_attempts = 1 + config->retry_count;
+    int fail_count = 0;
+
+    for (int attempt = 1; attempt <= max_attempts && !g_interrupted; attempt++) {
+        *attempt_out = attempt;
+
+        if (attempt > 1) {
+            printf("\n");
+            LOG_WARN("========================================");
+            LOG_WARN("=== UNIT TEST RETRY %d/%d (FAIL: %d) ===",
+                    attempt - 1, config->retry_count, fail_count);
+            LOG_WARN("========================================");
+            printf("\n");
+        }
+
+        // Clear results
+        memset(results, 0, MAX_RESULTS * sizeof(struct latency_result));
+        *result_count = 0;
+
+        // Run unit test
+        int ret = run_latency_test_unit(config, results, result_count);
+
+        if (ret < 0) {
+            LOG_ERROR("Unit test failed with error: %d", ret);
+            return ret;
+        }
+
+        // Count failures
+        fail_count = count_failed_results(results, *result_count);
+
+        // Print results
+        print_results_table_with_attempt(results, *result_count, config->packet_count, attempt);
+
+        if (fail_count == 0) {
+            LOG_INFO("All unit tests PASS (attempt %d/%d)", attempt, max_attempts);
+            return 0;
+        }
+
+        if (attempt < max_attempts) {
+            LOG_WARN("Unit test FAIL count: %d, retrying...", fail_count);
+            usleep(100000);  // 100ms
+        }
+    }
+
+    LOG_WARN("Unit test: all attempts completed, still %d FAIL", fail_count);
+    return fail_count;
+}

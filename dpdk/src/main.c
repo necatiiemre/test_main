@@ -58,43 +58,44 @@ int main(int argc, char const *argv[])
     printf("\n");
 
     // =========================================================================
-    // MELLANOX HW TIMESTAMP LATENCY TEST (BEFORE DPDK EAL INIT!)
+    // COMPLETE LATENCY TEST SEQUENCE (BEFORE DPDK EAL INIT!)
     // =========================================================================
+    // 1. Loopback Test (optional) - Measures NIC latency
+    // 2. Unit Test (always) - Measures end-to-end latency through switch
+    // 3. Calculate Net Latency = Unit - Loopback
+    //
     // Raw socket kullandığı için DPDK port'ları almadan önce çalışmalı.
-    // Sonuçlar g_mellanox_latency_summary global struct'ında saklanır.
+    // Results accessible via:
+    //   - g_loopback_result (loopback test results)
+    //   - g_unit_result (unit test results)
+    //   - g_combined_result (combined with net latency)
     // =========================================================================
 #if MELLANOX_HW_LATENCY_ENABLED
-    int mlx_ret = run_mellanox_hw_latency_test(1, 1);  // 1 packet, verbose=1
+    int mlx_ret = run_complete_latency_test(1, 1);  // 1 packet, verbose=1
     if (mlx_ret < 0) {
-        printf("Warning: Mellanox HW latency test failed with error: %d\n", mlx_ret);
+        printf("Warning: Latency test sequence failed with error: %d\n", mlx_ret);
         printf("Continuing with DPDK initialization...\n");
-    } else if (mlx_ret > 0) {
-        printf("Warning: Mellanox HW latency test: %d VLANs failed threshold\n", mlx_ret);
     }
 
-    // Sonuçlara erişim örneği:
-    if (g_mellanox_latency_summary.test_completed) {
+    // Display per-port net latency (accessible from DPDK workers)
+    if (g_combined_result.unit_completed) {
         printf("\n");
         printf("╔══════════════════════════════════════════════════════════════════╗\n");
-        printf("║  MELLANOX HW LATENCY RESULTS (Available in DPDK code)            ║\n");
+        printf("║  LATENCY RESULTS (Available in DPDK code via global structs)     ║\n");
         printf("╠══════════════════════════════════════════════════════════════════╣\n");
-        printf("║  Global Avg: %.2f us | Min: %.2f us | Max: %.2f us             ║\n",
-               g_mellanox_latency_summary.global_avg_us,
-               g_mellanox_latency_summary.global_min_us,
-               g_mellanox_latency_summary.global_max_us);
-        printf("║  Status: %s                                                    ║\n",
-               g_mellanox_latency_summary.test_passed ? "ALL PASS" : "FAILED  ");
-        printf("╚══════════════════════════════════════════════════════════════════╝\n");
-        printf("\n");
-
-        // Per-port latency örneği (DPDK worker'lardan erişilebilir)
-        printf("Per-port average latency (accessible via get_port_avg_latency_us()):\n");
+        printf("║  Loopback: %s                                          ║\n",
+               g_combined_result.loopback_used_default ? "DEFAULT (14.0 us)" : "MEASURED");
+        printf("║  Global Net Latency: %.2f us (Unit - Loopback)                  ║\n",
+               g_combined_result.global_net_us);
+        printf("╠══════════════════════════════════════════════════════════════════╣\n");
+        printf("║  Per-port Net Latency (accessible via get_port_net_latency_us()):║\n");
         for (int p = 0; p < MLX_MAX_PORT_PAIRS; p++) {
-            double avg = get_port_avg_latency_us((uint16_t)p);
-            if (avg >= 0) {
-                printf("  Port %d: %.2f us\n", p, avg);
+            double net = get_port_net_latency_us((uint16_t)p);
+            if (net >= -0.5) {  // Valid result
+                printf("║    Port %d: %.2f us                                            ║\n", p, net);
             }
         }
+        printf("╚══════════════════════════════════════════════════════════════════╝\n");
         printf("\n");
     }
 #endif

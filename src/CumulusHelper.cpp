@@ -2,6 +2,7 @@
 #include "SSHDeployer.h"
 #include <iostream>
 #include <filesystem>
+#include <vector>
 
 // Global instance
 CumulusHelper g_cumulus;
@@ -1354,13 +1355,42 @@ bool CumulusHelper::deployNetworkInterfaces(const std::string& local_interfaces_
     std::cout << getLogPrefix() << " Deploying Network Interfaces" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // Resolve relative paths to absolute paths
-    std::filesystem::path interfaces_path(local_interfaces_path);
-    if (interfaces_path.is_relative())
+    // Resolve file path - search in multiple locations for relative paths
+    std::string resolved_path;
+    std::filesystem::path input_path(local_interfaces_path);
+
+    if (input_path.is_absolute())
     {
-        interfaces_path = std::filesystem::current_path() / interfaces_path;
+        resolved_path = local_interfaces_path;
     }
-    std::string resolved_path = interfaces_path.string();
+    else
+    {
+        // Search locations: current dir, parent dir (project root from build/)
+        std::vector<std::filesystem::path> search_paths = {
+            std::filesystem::current_path() / input_path,
+            std::filesystem::current_path().parent_path() / input_path
+        };
+
+        for (const auto& path : search_paths)
+        {
+            if (std::filesystem::exists(path))
+            {
+                resolved_path = path.string();
+                break;
+            }
+        }
+
+        if (resolved_path.empty())
+        {
+            std::cerr << getLogPrefix() << " Deploy failed: Cannot find file '" << local_interfaces_path << "'" << std::endl;
+            std::cerr << getLogPrefix() << " Searched in:" << std::endl;
+            for (const auto& path : search_paths)
+            {
+                std::cerr << "  - " << path.string() << std::endl;
+            }
+            return false;
+        }
+    }
 
     std::cout << getLogPrefix() << " Using interfaces file: " << resolved_path << std::endl;
 

@@ -1,6 +1,7 @@
 #include "CumulusHelper.h"
 #include "SSHDeployer.h"
 #include <iostream>
+#include <filesystem>
 
 // Global instance
 CumulusHelper g_cumulus;

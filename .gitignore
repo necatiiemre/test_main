@@ -1,0 +1,19 @@
+# Build artifacts
+*.o
+*.a
+*.so
+obj/
+
+# Compiled binaries
+mellanox_latency/mellanox_latency
+dpdk/dpdk_app
+dpdk/dpdk_app-debug
+dpdk/dpdk_app-static
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Debug files
+*.dSYM/

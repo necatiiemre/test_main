@@ -243,6 +243,27 @@ static int create_raw_socket(const char *ifname, int *if_index, emb_sock_type_t 
 // PACKET BUILDING
 // ============================================
 
+// IP header checksum calculation
+static uint16_t ip_checksum(const void *data, size_t len) {
+    const uint16_t *ptr = (const uint16_t *)data;
+    uint32_t sum = 0;
+
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+
+    if (len == 1) {
+        sum += *(const uint8_t *)ptr;
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    return (uint16_t)(~sum);
+}
+
 static int build_packet(uint8_t *buf, uint16_t vlan_id, uint16_t vl_id, uint64_t seq) {
     memset(buf, 0, PACKET_SIZE);
     int offset = 0;
@@ -270,17 +291,21 @@ static int build_packet(uint8_t *buf, uint16_t vlan_id, uint16_t vl_id, uint64_t
     buf[offset++] = (ETH_P_IP >> 8) & 0xFF;
     buf[offset++] = ETH_P_IP & 0xFF;
 
-    // IP header (minimal)
+    // IP header start offset (for checksum calculation)
+    int ip_hdr_start = offset;
+
+    // IP header
     buf[offset++] = 0x45;  // Version + IHL
     buf[offset++] = 0x00;  // TOS
     uint16_t ip_len = PACKET_SIZE - 14 - 4;  // Total - ETH - VLAN
     buf[offset++] = (ip_len >> 8) & 0xFF;
     buf[offset++] = ip_len & 0xFF;
-    buf[offset++] = 0x00; buf[offset++] = 0x00;  // ID
+    buf[offset++] = (seq >> 8) & 0xFF;  // ID (use seq for identification)
+    buf[offset++] = seq & 0xFF;
     buf[offset++] = 0x00; buf[offset++] = 0x00;  // Flags + Fragment
     buf[offset++] = 0x01;  // TTL
     buf[offset++] = 0x11;  // Protocol: UDP
-    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum (0 = ignore)
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum (calculated below)
 
     // Source IP: 10.0.0.0
     buf[offset++] = 10; buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0;
@@ -291,20 +316,55 @@ static int build_packet(uint8_t *buf, uint16_t vlan_id, uint16_t vl_id, uint64_t
     buf[offset++] = (vl_id >> 8) & 0xFF;
     buf[offset++] = vl_id & 0xFF;
 
+    // Calculate and set IP checksum
+    uint16_t csum = ip_checksum(buf + ip_hdr_start, 20);
+    buf[ip_hdr_start + 10] = (csum >> 8) & 0xFF;
+    buf[ip_hdr_start + 11] = csum & 0xFF;
+
     // UDP header
     buf[offset++] = 0x00; buf[offset++] = 0x64;  // Src port: 100
     buf[offset++] = 0x00; buf[offset++] = 0x64;  // Dst port: 100
     uint16_t udp_len = ip_len - 20;
     buf[offset++] = (udp_len >> 8) & 0xFF;
     buf[offset++] = udp_len & 0xFF;
-    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum (optional for UDP)
 
-    // Sequence number (8 bytes)
+    // Sequence number (8 bytes, big endian)
     for (int i = 7; i >= 0; i--) {
         buf[offset++] = (seq >> (i * 8)) & 0xFF;
     }
 
     return PACKET_SIZE;
+}
+
+// Check if packet is our test packet (handles VLAN stripped case)
+static bool is_our_test_packet(const uint8_t *pkt, size_t len, uint16_t expected_vlan, uint16_t expected_vlid) {
+    if (len < 14) return false;
+
+    // Check DST MAC prefix: 03:00:00:00:XX:XX
+    if (pkt[0] != DST_MAC_PREFIX[0] || pkt[1] != DST_MAC_PREFIX[1] ||
+        pkt[2] != DST_MAC_PREFIX[2] || pkt[3] != DST_MAC_PREFIX[3]) {
+        return false;
+    }
+
+    // Check VL-ID from DST MAC
+    uint16_t vl_id = ((uint16_t)pkt[4] << 8) | pkt[5];
+    if (expected_vlid != 0 && vl_id != expected_vlid) {
+        return false;
+    }
+
+    // Check if VLAN tagged (EtherType at offset 12-13)
+    uint16_t ether_type = ((uint16_t)pkt[12] << 8) | pkt[13];
+    if (ether_type == ETH_P_8021Q) {
+        // VLAN tagged - check VLAN ID at offset 14-15
+        uint16_t vlan_id = (((uint16_t)pkt[14] << 8) | pkt[15]) & 0x0FFF;
+        if (expected_vlan != 0 && vlan_id != expected_vlan) {
+            return false;
+        }
+    }
+    // If untagged (VLAN stripped by switch), accept based on VL-ID match
+
+    return true;
 }
 
 // ============================================
@@ -416,10 +476,8 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
 
                 ssize_t len = recvmsg(rx_fd, &msg, 0);
                 if (len > 0) {
-                    // Check VLAN match (offset 14-15 after TPID)
-                    uint16_t rx_vlan = (rx_buf[14] << 8) | rx_buf[15];
-
-                    if ((rx_vlan & 0x0FFF) == vlan_id) {
+                    // Check if this is our test packet (handles VLAN stripped case)
+                    if (is_our_test_packet(rx_buf, len, vlan_id, vl_id)) {
                         uint64_t rx_ts = 0;
                         extract_timestamp(&msg, &rx_ts);
 
@@ -662,7 +720,10 @@ int emb_latency_run_loopback(int packet_count, int timeout_ms, int max_latency_u
     g_emb_latency.loopback_passed = (failed_count == 0);
     g_emb_latency.loopback_skipped = false;
 
-    printf("\nLoopback test complete: %d/%d passed\n\n", passed_count, result_idx);
+    // Print results table
+    emb_latency_print_loopback();
+
+    printf("Loopback test complete: %d/%d passed\n\n", passed_count, result_idx);
 
     return failed_count;
 }
@@ -733,7 +794,10 @@ int emb_latency_run_unit_test(int packet_count, int timeout_ms, int max_latency_
     g_emb_latency.unit_completed = true;
     g_emb_latency.unit_passed = (failed_count == 0);
 
-    printf("\nUnit test complete: %d/%d passed\n\n", passed_count, result_idx);
+    // Print results table
+    emb_latency_print_unit();
+
+    printf("Unit test complete: %d/%d passed\n\n", passed_count, result_idx);
 
     return failed_count;
 }
@@ -975,7 +1039,8 @@ static void print_table_title(const char *title) {
     printf("║\n");
 }
 
-void emb_latency_print(void) {
+// Generic function to print results table
+static void print_results_table(const char *title, struct emb_latency_result *results, int count) {
     // Calculate statistics
     int successful = 0;
     int passed_count = 0;
@@ -983,8 +1048,8 @@ void emb_latency_print(void) {
     double min_of_mins = 1e9;
     double max_of_maxs = 0.0;
 
-    for (uint32_t i = 0; i < g_emb_latency.result_count; i++) {
-        struct emb_latency_result *r = &g_emb_latency.results[i];
+    for (int i = 0; i < count; i++) {
+        struct emb_latency_result *r = &results[i];
         if (r->rx_count > 0) {
             successful++;
             double avg = ns_to_us(r->avg_latency_ns);
@@ -1005,7 +1070,7 @@ void emb_latency_print(void) {
     print_table_line("╔", "╦", "╗", "═");
 
     // Title
-    print_table_title("LATENCY TEST RESULTS (Timestamp: HARDWARE NIC)");
+    print_table_title(title);
 
     // Header separator
     print_table_line("╠", "╬", "╣", "═");
@@ -1026,8 +1091,8 @@ void emb_latency_print(void) {
     print_table_line("╠", "╬", "╣", "═");
 
     // Data rows
-    for (uint32_t i = 0; i < g_emb_latency.result_count; i++) {
-        struct emb_latency_result *r = &g_emb_latency.results[i];
+    for (int i = 0; i < count; i++) {
+        struct emb_latency_result *r = &results[i];
 
         char min_str[16], avg_str[16], max_str[16], rxtx_str[16];
         const char *result_str = r->passed ? "PASS" : "FAIL";
@@ -1062,14 +1127,14 @@ void emb_latency_print(void) {
     char summary[128];
     if (successful > 0) {
         snprintf(summary, sizeof(summary),
-                "SUMMARY: PASS %d/%u | Avg: %.2f us | Max: %.2f us | Packets/VLAN: 1",
-                passed_count, g_emb_latency.result_count,
+                "SUMMARY: PASS %d/%d | Avg: %.2f us | Max: %.2f us | Packets/VLAN: 1",
+                passed_count, count,
                 total_avg_latency / successful,
                 max_of_maxs);
     } else {
         snprintf(summary, sizeof(summary),
-                "SUMMARY: PASS %d/%u | Packets/VLAN: 1",
-                passed_count, g_emb_latency.result_count);
+                "SUMMARY: PASS %d/%d | Packets/VLAN: 1",
+                passed_count, count);
     }
     print_table_title(summary);
 
@@ -1078,6 +1143,21 @@ void emb_latency_print(void) {
 
     printf("\n");
     fflush(stdout);
+}
+
+void emb_latency_print(void) {
+    print_results_table("LATENCY TEST RESULTS (Timestamp: HARDWARE NIC)",
+                        g_emb_latency.results, g_emb_latency.result_count);
+}
+
+void emb_latency_print_loopback(void) {
+    print_results_table("LOOPBACK TEST RESULTS (Switch Latency)",
+                        g_emb_latency.loopback_results, g_emb_latency.loopback_result_count);
+}
+
+void emb_latency_print_unit(void) {
+    print_results_table("UNIT TEST RESULTS (Device Latency)",
+                        g_emb_latency.unit_results, g_emb_latency.unit_result_count);
 }
 
 void emb_latency_print_summary(void) {

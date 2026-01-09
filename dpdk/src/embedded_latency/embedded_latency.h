@@ -220,6 +220,16 @@ bool emb_latency_get_us(uint16_t vlan_id, double *min, double *avg, double *max)
 void emb_latency_print(void);
 
 /**
+ * Print loopback test results
+ */
+void emb_latency_print_loopback(void);
+
+/**
+ * Print unit test results
+ */
+void emb_latency_print_unit(void);
+
+/**
  * Print summary only
  */
 void emb_latency_print_summary(void);

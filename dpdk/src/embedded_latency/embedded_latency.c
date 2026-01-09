@@ -167,7 +167,12 @@ static double ns_to_us(uint64_t ns) {
 // HW TIMESTAMP SOCKET
 // ============================================
 
-static int create_raw_socket(const char *ifname, int *if_index) {
+typedef enum {
+    EMB_SOCK_TX,
+    EMB_SOCK_RX
+} emb_sock_type_t;
+
+static int create_raw_socket(const char *ifname, int *if_index, emb_sock_type_t type) {
     int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
         perror("socket");
@@ -198,32 +203,49 @@ static int create_raw_socket(const char *ifname, int *if_index) {
         return -1;
     }
 
-    // Enable HW timestamping
+    // Enable promiscuous mode for RX socket (needed for multicast packets)
+    if (type == EMB_SOCK_RX) {
+        struct packet_mreq mreq;
+        memset(&mreq, 0, sizeof(mreq));
+        mreq.mr_ifindex = *if_index;
+        mreq.mr_type = PACKET_MR_PROMISC;
+
+        if (setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            printf("[EMB_LAT] Warning: Failed to enable promiscuous mode on %s\n", ifname);
+        } else {
+            printf("[EMB_LAT] Promiscuous mode enabled on %s\n", ifname);
+        }
+    }
+
+    // Enable HW timestamping on NIC
     struct hwtstamp_config hwconfig = {0};
-    hwconfig.tx_type = HWTSTAMP_TX_ON;
-    hwconfig.rx_filter = HWTSTAMP_FILTER_ALL;
+    hwconfig.tx_type = (type == EMB_SOCK_TX) ? HWTSTAMP_TX_ON : HWTSTAMP_TX_OFF;
+    hwconfig.rx_filter = (type == EMB_SOCK_RX) ? HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
 
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
     ifr.ifr_data = (void *)&hwconfig;
 
     if (ioctl(fd, SIOCSHWTSTAMP, &ifr) < 0) {
-        // Some NICs don't support this, continue anyway
+        printf("[EMB_LAT] Warning: SIOCSHWTSTAMP failed on %s (may still work)\n", ifname);
     }
 
     // Request timestamps via socket option
-    int flags = SOF_TIMESTAMPING_TX_HARDWARE |
-                SOF_TIMESTAMPING_RX_HARDWARE |
-                SOF_TIMESTAMPING_RAW_HARDWARE |
-                SOF_TIMESTAMPING_SOFTWARE |
-                SOF_TIMESTAMPING_TX_SOFTWARE |
-                SOF_TIMESTAMPING_RX_SOFTWARE;
+    int flags = SOF_TIMESTAMPING_RAW_HARDWARE;
+    if (type == EMB_SOCK_TX) {
+        flags |= SOF_TIMESTAMPING_TX_HARDWARE;
+    } else {
+        flags |= SOF_TIMESTAMPING_RX_HARDWARE;
+    }
 
     if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags)) < 0) {
         perror("SO_TIMESTAMPING");
         close(fd);
         return -1;
     }
+
+    printf("[EMB_LAT] Created %s socket for %s (fd=%d, ifindex=%d)\n",
+           type == EMB_SOCK_TX ? "TX" : "RX", ifname, fd, *if_index);
 
     return fd;
 }
@@ -300,19 +322,28 @@ static int build_packet(uint8_t *buf, uint16_t vlan_id, uint16_t vl_id, uint64_t
 // TIMESTAMP EXTRACTION
 // ============================================
 
+// SCM_TIMESTAMPING is the correct cmsg_type for SO_TIMESTAMPING
+#ifndef SCM_TIMESTAMPING
+#define SCM_TIMESTAMPING SO_TIMESTAMPING
+#endif
+
 static bool extract_timestamp(struct msghdr *msg, uint64_t *ts_ns) {
     struct cmsghdr *cmsg;
 
     for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMPING) {
             struct timespec *ts = (struct timespec *)CMSG_DATA(cmsg);
-            // ts[0] = software, ts[1] = deprecated, ts[2] = hardware
+            // ts[0] = software, ts[1] = deprecated, ts[2] = hardware (raw)
+
+            // Hardware timestamp preferred
             if (ts[2].tv_sec != 0 || ts[2].tv_nsec != 0) {
                 *ts_ns = (uint64_t)ts[2].tv_sec * 1000000000ULL + ts[2].tv_nsec;
                 return true;
             }
+            // Software timestamp fallback
             if (ts[0].tv_sec != 0 || ts[0].tv_nsec != 0) {
                 *ts_ns = (uint64_t)ts[0].tv_sec * 1000000000ULL + ts[0].tv_nsec;
+                printf("[EMB_LAT] Warning: Using SW timestamp (HW not available)\n");
                 return true;
             }
         }
@@ -338,6 +369,9 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
     result->vl_id = vl_id;
     result->min_latency_ns = UINT64_MAX;
 
+    printf("[EMB_LAT]   VLAN %u (VL-ID %u): Port %d -> Port %d\n",
+           vlan_id, vl_id, tx_port, rx_port);
+
     uint8_t tx_buf[2048];
     uint8_t rx_buf[2048];
     char ctrl_buf[1024];
@@ -360,10 +394,12 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
         ssize_t sent = sendto(tx_fd, tx_buf, pkt_len, 0,
                               (struct sockaddr *)&sll, sizeof(sll));
         if (sent < 0) {
-            snprintf(result->error_msg, sizeof(result->error_msg), "send failed");
+            printf("[EMB_LAT]     TX[%d] FAILED: %s\n", pkt, strerror(errno));
+            snprintf(result->error_msg, sizeof(result->error_msg), "send failed: %s", strerror(errno));
             continue;
         }
         result->tx_count++;
+        printf("[EMB_LAT]     TX[%d] sent %zd bytes\n", pkt, sent);
 
         // Get TX timestamp from error queue
         uint64_t tx_ts = 0;
@@ -377,7 +413,13 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
             msg.msg_controllen = sizeof(ctrl_buf);
 
             recvmsg(tx_fd, &msg, MSG_ERRQUEUE);
-            extract_timestamp(&msg, &tx_ts);
+            if (extract_timestamp(&msg, &tx_ts)) {
+                printf("[EMB_LAT]     TX timestamp: %lu ns\n", tx_ts);
+            } else {
+                printf("[EMB_LAT]     TX timestamp: NOT AVAILABLE\n");
+            }
+        } else {
+            printf("[EMB_LAT]     TX timestamp poll timeout\n");
         }
 
         // Wait for RX
@@ -399,9 +441,14 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
                 if (len > 0) {
                     // Check VLAN match (offset 14-15 after TPID)
                     uint16_t rx_vlan = (rx_buf[14] << 8) | rx_buf[15];
+                    printf("[EMB_LAT]     RX: %zd bytes, VLAN in packet: %u (expected: %u)\n",
+                           len, rx_vlan & 0x0FFF, vlan_id);
+
                     if ((rx_vlan & 0x0FFF) == vlan_id) {
                         uint64_t rx_ts = 0;
                         extract_timestamp(&msg, &rx_ts);
+
+                        printf("[EMB_LAT]     RX timestamp: %lu ns, TX timestamp: %lu ns\n", rx_ts, tx_ts);
 
                         if (rx_ts > 0 && tx_ts > 0 && rx_ts > tx_ts) {
                             uint64_t latency = rx_ts - tx_ts;
@@ -414,11 +461,18 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
 
                             result->rx_count++;
                             received = true;
+                            printf("[EMB_LAT]     Latency: %.2f us\n", (double)latency / 1000.0);
+                        } else {
+                            printf("[EMB_LAT]     Invalid timestamps (rx=%lu, tx=%lu)\n", rx_ts, tx_ts);
                         }
                     }
                 }
             }
             remaining -= 100;
+        }
+
+        if (!received) {
+            printf("[EMB_LAT]     RX TIMEOUT - no matching packet received\n");
         }
     }
 
@@ -429,11 +483,21 @@ static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
         result->passed = (result->max_latency_ns <= max_latency_ns);
         if (result->min_latency_ns == UINT64_MAX)
             result->min_latency_ns = 0;
+
+        printf("[EMB_LAT]   VLAN %u Result: TX=%u RX=%u Min=%.2f Avg=%.2f Max=%.2f us -> %s\n",
+               vlan_id, result->tx_count, result->rx_count,
+               ns_to_us(result->min_latency_ns),
+               ns_to_us(result->avg_latency_ns),
+               ns_to_us(result->max_latency_ns),
+               result->passed ? "PASS" : "FAIL");
     } else {
         result->valid = false;
         result->passed = false;
         if (result->error_msg[0] == '\0')
             snprintf(result->error_msg, sizeof(result->error_msg), "No packets received");
+
+        printf("[EMB_LAT]   VLAN %u Result: TX=%u RX=0 -> FAIL (%s)\n",
+               vlan_id, result->tx_count, result->error_msg);
     }
 
     return result->passed ? 0 : 1;
@@ -461,21 +525,25 @@ int emb_latency_run(int packet_count, int timeout_ms, int max_latency_us) {
 
     // Test each port pair
     for (size_t p = 0; p < NUM_PORT_PAIRS; p++) {
-        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+        printf("\n[EMB_LAT] Testing Port %d -> Port %d (%s -> %s)...\n",
                PORT_PAIRS[p].tx_port, PORT_PAIRS[p].rx_port,
                PORT_PAIRS[p].tx_iface, PORT_PAIRS[p].rx_iface);
 
-        // Create sockets
+        // Create sockets (TX and RX separately)
         int tx_ifindex, rx_ifindex;
-        int tx_fd = create_raw_socket(PORT_PAIRS[p].tx_iface, &tx_ifindex);
-        int rx_fd = create_raw_socket(PORT_PAIRS[p].rx_iface, &rx_ifindex);
+        int tx_fd = create_raw_socket(PORT_PAIRS[p].tx_iface, &tx_ifindex, EMB_SOCK_TX);
+        int rx_fd = create_raw_socket(PORT_PAIRS[p].rx_iface, &rx_ifindex, EMB_SOCK_RX);
 
         if (tx_fd < 0 || rx_fd < 0) {
-            printf("  ERROR: Cannot create sockets\n");
+            printf("[EMB_LAT] ERROR: Cannot create sockets\n");
             if (tx_fd >= 0) close(tx_fd);
             if (rx_fd >= 0) close(rx_fd);
             continue;
         }
+
+        // Wait for sockets to fully initialize (critical for first packet!)
+        usleep(10000);  // 10ms
+        printf("[EMB_LAT] Sockets ready, starting VLAN tests...\n");
 
         // Test each VLAN
         for (int v = 0; v < PORT_PAIRS[p].vlan_count; v++) {
@@ -593,20 +661,24 @@ int emb_latency_run_loopback(int packet_count, int timeout_ms, int max_latency_u
 
     // Test each loopback port pair
     for (size_t p = 0; p < NUM_LOOPBACK_PAIRS; p++) {
-        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+        printf("\n[EMB_LAT] Testing Port %d -> Port %d (%s -> %s)...\n",
                LOOPBACK_PAIRS[p].tx_port, LOOPBACK_PAIRS[p].rx_port,
                LOOPBACK_PAIRS[p].tx_iface, LOOPBACK_PAIRS[p].rx_iface);
 
         int tx_ifindex, rx_ifindex;
-        int tx_fd = create_raw_socket(LOOPBACK_PAIRS[p].tx_iface, &tx_ifindex);
-        int rx_fd = create_raw_socket(LOOPBACK_PAIRS[p].rx_iface, &rx_ifindex);
+        int tx_fd = create_raw_socket(LOOPBACK_PAIRS[p].tx_iface, &tx_ifindex, EMB_SOCK_TX);
+        int rx_fd = create_raw_socket(LOOPBACK_PAIRS[p].rx_iface, &rx_ifindex, EMB_SOCK_RX);
 
         if (tx_fd < 0 || rx_fd < 0) {
-            printf("  ERROR: Cannot create sockets\n");
+            printf("[EMB_LAT] ERROR: Cannot create sockets\n");
             if (tx_fd >= 0) close(tx_fd);
             if (rx_fd >= 0) close(rx_fd);
             continue;
         }
+
+        // Wait for sockets to fully initialize
+        usleep(10000);  // 10ms
+        printf("[EMB_LAT] Sockets ready, starting VLAN tests...\n");
 
         for (int v = 0; v < LOOPBACK_PAIRS[p].vlan_count; v++) {
             struct emb_latency_result *r = &g_emb_latency.loopback_results[result_idx];
@@ -662,20 +734,24 @@ int emb_latency_run_unit_test(int packet_count, int timeout_ms, int max_latency_
 
     // Test each unit test port pair
     for (size_t p = 0; p < NUM_UNIT_TEST_PAIRS; p++) {
-        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+        printf("\n[EMB_LAT] Testing Port %d -> Port %d (%s -> %s)...\n",
                UNIT_TEST_PAIRS[p].tx_port, UNIT_TEST_PAIRS[p].rx_port,
                UNIT_TEST_PAIRS[p].tx_iface, UNIT_TEST_PAIRS[p].rx_iface);
 
         int tx_ifindex, rx_ifindex;
-        int tx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].tx_iface, &tx_ifindex);
-        int rx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].rx_iface, &rx_ifindex);
+        int tx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].tx_iface, &tx_ifindex, EMB_SOCK_TX);
+        int rx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].rx_iface, &rx_ifindex, EMB_SOCK_RX);
 
         if (tx_fd < 0 || rx_fd < 0) {
-            printf("  ERROR: Cannot create sockets\n");
+            printf("[EMB_LAT] ERROR: Cannot create sockets\n");
             if (tx_fd >= 0) close(tx_fd);
             if (rx_fd >= 0) close(rx_fd);
             continue;
         }
+
+        // Wait for sockets to fully initialize
+        usleep(10000);  // 10ms
+        printf("[EMB_LAT] Sockets ready, starting VLAN tests...\n");
 
         for (int v = 0; v < UNIT_TEST_PAIRS[p].vlan_count; v++) {
             struct emb_latency_result *r = &g_emb_latency.unit_results[result_idx];

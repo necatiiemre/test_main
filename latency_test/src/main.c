@@ -1,11 +1,11 @@
 /**
  * @file main.c
- * @brief Mellanox HW Timestamp Latency Test - Main Entry Point
+ * @brief HW Timestamp Latency Test - Main Entry Point
  *
  * Parses command line arguments and starts the test.
  *
  * Usage:
- *   ./mellanox_latency [options]
+ *   ./latency_test [options]
  *
  * Options:
  *   -n, --count <N>     Packet count per VLAN (default: 1)
@@ -77,7 +77,7 @@ static void signal_handler(int sig) {
 // ============================================
 
 static void print_usage(const char *prog) {
-    printf("Mellanox HW Timestamp Latency Test\n");
+    printf("HW Timestamp Latency Test\n");
     printf("==================================\n\n");
     printf("Usage: %s [options]\n\n", prog);
     printf("Options:\n");
@@ -289,8 +289,8 @@ int main(int argc, char *argv[]) {
     // Print config
     if (!csv_output) {
         printf("\n");
-        printf("Mellanox HW Timestamp Latency Test\n");
-        printf("==================================\n");
+        printf("HW Timestamp Latency Test\n");
+        printf("=========================\n");
         printf("Packet count (per VLAN): %d\n", config.packet_count);
         printf("Packet size: %d bytes\n", config.packet_size);
         printf("Inter-VLAN delay: %d us\n", config.delay_us);

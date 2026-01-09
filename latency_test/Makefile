@@ -1,4 +1,4 @@
-# Mellanox HW Timestamp Latency Test - Makefile
+# HW Timestamp Latency Test - Makefile
 #
 # Kullanim:
 #   make          - Normal derleme
@@ -22,7 +22,7 @@ OBJ_DIR = obj
 INC_DIR = include
 
 # Target
-TARGET = mellanox_latency
+TARGET = latency_test
 
 # Source files
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -75,7 +75,7 @@ uninstall:
 
 # Help
 help:
-	@echo "Mellanox HW Timestamp Latency Test - Build System"
+	@echo "HW Timestamp Latency Test - Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       - Build with optimizations (default)"

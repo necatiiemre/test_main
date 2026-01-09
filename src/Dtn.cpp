@@ -20,11 +20,11 @@ Dtn::~Dtn()
 {
 }
 
-bool Dtn::mellanoxLatencyTestSequence()
+bool Dtn::latencyTestSequence()
 {
     bool valid_test = false;
 
-    if (askQuestion("Do you want to run Mellanox HW Timestamp Latency Test (Default measured latency : 14us)"))
+    if (askQuestion("Do you want to run HW Timestamp Latency Test (Default measured latency : 14us)"))
     {
         while (!valid_test)
         {
@@ -32,7 +32,7 @@ bool Dtn::mellanoxLatencyTestSequence()
             if (answer)
             {
                 valid_test = true;
-                runMellanoxLatencyTest("-n 1 -vvv");
+                runLatencyTest("-n 1 -vvv");
             }
             else
             {
@@ -99,10 +99,10 @@ bool Dtn::ensureLogDirectories()
     }
 }
 
-bool Dtn::runMellanoxLatencyTest(const std::string &run_args, int timeout_seconds)
+bool Dtn::runLatencyTest(const std::string &run_args, int timeout_seconds)
 {
     std::cout << "======================================" << std::endl;
-    std::cout << "DTN: Mellanox HW Timestamp Latency Test" << std::endl;
+    std::cout << "DTN: HW Timestamp Latency Test" << std::endl;
     std::cout << "======================================" << std::endl;
 
     // Ensure log directories exist
@@ -113,7 +113,7 @@ bool Dtn::runMellanoxLatencyTest(const std::string &run_args, int timeout_second
     }
 
     // Build local log path
-    std::string local_log_path = LogPaths::DTN() + "/mellanox_latency.log";
+    std::string local_log_path = LogPaths::DTN() + "/latency_test.log";
 
     std::cout << "DTN: Run arguments: " << (run_args.empty() ? "(default)" : run_args) << std::endl;
     std::cout << "DTN: Timeout: " << timeout_seconds << " seconds" << std::endl;
@@ -121,8 +121,8 @@ bool Dtn::runMellanoxLatencyTest(const std::string &run_args, int timeout_second
 
     // Run the test using SSHDeployer
     bool result = g_ssh_deployer_server.deployBuildRunAndFetchLog(
-        "mellanox_latency", // Source folder (auto-resolved from source root)
-        "mellanox_latency", // Executable name
+        "latency_test", // Source folder (auto-resolved from source root)
+        "latency_test", // Executable name
         run_args,           // Arguments (e.g., "-n 10 -v")
         local_log_path,     // Local log path
         timeout_seconds     // Timeout
@@ -131,13 +131,13 @@ bool Dtn::runMellanoxLatencyTest(const std::string &run_args, int timeout_second
     if (result)
     {
         std::cout << "======================================" << std::endl;
-        std::cout << "DTN: Mellanox Latency Test COMPLETED" << std::endl;
+        std::cout << "DTN: Latency Test COMPLETED" << std::endl;
         std::cout << "DTN: Log saved to: " << local_log_path << std::endl;
         std::cout << "======================================" << std::endl;
     }
     else
     {
-        std::cerr << "DTN: Mellanox Latency Test FAILED!" << std::endl;
+        std::cerr << "DTN: Latency Test FAILED!" << std::endl;
     }
 
     return result;
@@ -257,8 +257,8 @@ bool Dtn::configureSequence()
     // DPDK başladı, şimdi istediğin işlemleri yap
     // sleep(360);
 
-    // Ask user if they want to run Mellanox latency test
-    mellanoxLatencyTestSequence();
+    // Ask user if they want to run latency test
+    latencyTestSequence();
 
     utils::waitForCtrlC();
 

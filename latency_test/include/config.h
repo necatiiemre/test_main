@@ -1,6 +1,6 @@
 /**
  * @file config.h
- * @brief Mellanox HW Timestamp Latency Test - Configuration
+ * @brief HW Timestamp Latency Test - Configuration
  *
  * This file contains all port, VLAN, VL-ID and timing configurations.
  * Standalone application - does not require DPDK.

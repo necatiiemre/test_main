@@ -5,11 +5,21 @@
  * Bu header, mellanox_latency testini DPDK uygulamasına entegre eder.
  * Test sonuçları global struct üzerinden tüm DPDK koduna erişilebilir.
  *
- * Kullanım:
- *   1. DPDK EAL init'ten ÖNCE run_mellanox_hw_latency_test() çağır
- *   2. Sonuçlara g_mellanox_latency_summary üzerinden eriş
+ * İKİ TEST MODU:
+ *   1. LOOPBACK TEST: Direkt kablo ile NIC latency ölçümü
+ *   2. UNIT TEST: Switch üzerinden uçtan uca latency ölçümü
  *
- * Not: Mellanox testi raw socket kullandığı için DPDK port'ları
+ * NET LATENCY = UNIT LATENCY - LOOPBACK LATENCY
+ * (Pure unit/switch latency, NIC overhead çıkarılmış)
+ *
+ * Kullanım:
+ *   1. DPDK EAL init'ten ÖNCE loopback/unit test çağır
+ *   2. Sonuçlara global struct'lar üzerinden eriş:
+ *      - g_loopback_test_result (loopback test sonuçları)
+ *      - g_unit_test_result (unit test sonuçları)
+ *      - g_combined_latency_result (net latency dahil)
+ *
+ * Not: Testler raw socket kullandığı için DPDK port'ları
  * almadan önce çalıştırılmalıdır.
  */
 
@@ -32,6 +42,17 @@
 #define MLX_MAX_PORT_PAIRS      8
 #define MLX_MAX_VLANS_PER_PAIR  4
 #define MLX_MAX_RESULTS         (MLX_MAX_PORT_PAIRS * MLX_MAX_VLANS_PER_PAIR)  // 32
+
+// Default loopback latency (microseconds) - used when loopback test skipped
+#define MLX_DEFAULT_LOOPBACK_LATENCY_US  14.0
+
+// ============================================
+// TEST TYPES
+// ============================================
+typedef enum {
+    MLX_TEST_LOOPBACK,      // Direct cable loopback test (NIC latency)
+    MLX_TEST_UNIT           // Unit test through switch (end-to-end latency)
+} mlx_test_type_t;
 
 // ============================================
 // PER-VLAN LATENCY RESULT

@@ -18,6 +18,7 @@
  *   -b, --busy-wait     Use busy-wait for precise timing
  *   -C, --check         Only check interfaces
  *   -I, --info          Show interface HW timestamp info
+ *   -S, --shm           Write results to shared memory (for DPDK)
  *   -h, --help          Help
  */
 
@@ -32,6 +33,7 @@
 #include "config.h"
 #include "hw_timestamp.h"
 #include "latency_test.h"
+#include "latency_results_shm.h"
 
 // ============================================
 // GLOBAL VARIABLES
@@ -42,6 +44,8 @@ volatile int g_interrupted = 0;
 
 // Global pointers for cleanup
 static struct latency_result *g_results = NULL;
+static struct latency_shm_header *g_shm = NULL;
+static bool g_use_shm = false;
 
 // ============================================
 // CLEANUP
@@ -49,6 +53,13 @@ static struct latency_result *g_results = NULL;
 
 static void cleanup(void) {
     LOG_DEBUG("Cleaning up...");
+
+    // Close shared memory (but don't unlink - DPDK may still need it)
+    if (g_shm != NULL) {
+        latency_shm_close_writer(g_shm);
+        g_shm = NULL;
+        LOG_DEBUG("Shared memory closed");
+    }
 
     // Free results
     if (g_results != NULL) {
@@ -91,6 +102,7 @@ static void print_usage(const char *prog) {
     printf("  -b, --busy-wait     Use busy-wait for precise timing\n");
     printf("  -C, --check         Only check interfaces\n");
     printf("  -I, --info          Show interface HW timestamp info\n");
+    printf("  -S, --shm           Write results to shared memory (for DPDK)\n");
     printf("  -h, --help          This help message\n");
     printf("\n");
     printf("Examples:\n");
@@ -163,13 +175,14 @@ int main(int argc, char *argv[]) {
         {"busy-wait", no_argument,       0, 'b'},
         {"check",     no_argument,       0, 'C'},
         {"info",      no_argument,       0, 'I'},
+        {"shm",       no_argument,       0, 'S'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     // Parse arguments
     int opt;
-    while ((opt = getopt_long(argc, argv, "n:s:d:T:p:vcbCIh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "n:s:d:T:p:vcbCISh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'n':
                 config.packet_count = atoi(optarg);
@@ -236,6 +249,10 @@ int main(int argc, char *argv[]) {
 
             case 'I':
                 show_info = true;
+                break;
+
+            case 'S':
+                g_use_shm = true;
                 break;
 
             case 'h':
@@ -310,6 +327,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Initialize shared memory if requested
+    if (g_use_shm) {
+        LOG_INFO("Initializing shared memory for results...");
+        g_shm = latency_shm_create();
+        if (!g_shm) {
+            LOG_ERROR("Failed to create shared memory");
+            return 1;
+        }
+        // Store test configuration
+        g_shm->packet_count = config.packet_count;
+        g_shm->packet_size = config.packet_size;
+        g_shm->max_latency_ns = config.max_latency_ns;
+    }
+
     int result_count = 0;
     int attempt = 0;
 
@@ -332,6 +363,37 @@ int main(int argc, char *argv[]) {
         extern void print_results_csv(const struct latency_result *results, int result_count);
         printf("\n--- CSV EXPORT ---\n");
         print_results_csv(g_results, result_count);
+    }
+
+    // Write results to shared memory if enabled
+    if (g_use_shm && g_shm && result_count > 0) {
+        LOG_INFO("Writing results to shared memory...");
+
+        // Copy results to shared memory
+        // Note: struct latency_result and struct shm_latency_result have the same layout
+        for (int i = 0; i < result_count; i++) {
+            struct shm_latency_result shm_result;
+            const struct latency_result *r = &g_results[i];
+
+            shm_result.tx_port = r->tx_port;
+            shm_result.rx_port = r->rx_port;
+            shm_result.vlan_id = r->vlan_id;
+            shm_result.vl_id = r->vl_id;
+            shm_result.tx_count = r->tx_count;
+            shm_result.rx_count = r->rx_count;
+            shm_result.min_latency_ns = r->min_latency_ns;
+            shm_result.max_latency_ns = r->max_latency_ns;
+            shm_result.total_latency_ns = r->total_latency_ns;
+            shm_result.valid = r->valid;
+            shm_result.passed = r->passed;
+            strncpy(shm_result.error_msg, r->error_msg, sizeof(shm_result.error_msg) - 1);
+
+            latency_shm_write_result(g_shm, &shm_result, i);
+        }
+
+        // Finalize and mark as complete
+        latency_shm_finalize(g_shm, result_count);
+        LOG_INFO("Results written to shared memory '%s'", LATENCY_SHM_NAME);
     }
 
     LOG_INFO("Test completed (total attempts: %d)", attempt);

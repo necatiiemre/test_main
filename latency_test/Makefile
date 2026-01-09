@@ -9,8 +9,8 @@
 
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -std=gnu11 -I./include
-LDFLAGS = -lpthread
+CFLAGS = -Wall -Wextra -Werror -std=gnu11 -I./include -I../shared
+LDFLAGS = -lpthread -lrt
 
 # Optimization
 RELEASE_FLAGS = -O2 -march=native
@@ -20,14 +20,18 @@ DEBUG_FLAGS = -O0 -g3 -DDEBUG
 SRC_DIR = src
 OBJ_DIR = obj
 INC_DIR = include
+SHARED_DIR = ../shared
 
 # Target
 TARGET = latency_test
 
-# Source files
+# Source files (include shared sources)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
+SHARED_SRCS = $(SHARED_DIR)/latency_results_shm.c
 OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
-DEPS = $(wildcard $(INC_DIR)/*.h)
+SHARED_OBJS = $(OBJ_DIR)/latency_results_shm.o
+ALL_OBJS = $(OBJS) $(SHARED_OBJS)
+DEPS = $(wildcard $(INC_DIR)/*.h) $(wildcard $(SHARED_DIR)/*.h)
 
 # Default target
 all: CFLAGS += $(RELEASE_FLAGS)
@@ -38,15 +42,20 @@ debug: CFLAGS += $(DEBUG_FLAGS)
 debug: $(TARGET)
 
 # Link
-$(TARGET): $(OBJS)
+$(TARGET): $(ALL_OBJS)
 	@echo "  LD    $@"
-	@$(CC) $(OBJS) -o $@ $(LDFLAGS)
+	@$(CC) $(ALL_OBJS) -o $@ $(LDFLAGS)
 	@echo ""
 	@echo "Build successful: $(TARGET)"
 	@echo "Run with: sudo ./$(TARGET) -h"
 
-# Compile
+# Compile src files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(DEPS) | $(OBJ_DIR)
+	@echo "  CC    $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile shared files
+$(OBJ_DIR)/latency_results_shm.o: $(SHARED_DIR)/latency_results_shm.c $(SHARED_DIR)/latency_results_shm.h | $(OBJ_DIR)
 	@echo "  CC    $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
@@ -95,7 +104,7 @@ help:
 .PHONY: all debug clean install uninstall help
 
 # Dependencies
-$(OBJ_DIR)/main.o: $(SRC_DIR)/main.c $(INC_DIR)/common.h $(INC_DIR)/config.h $(INC_DIR)/hw_timestamp.h $(INC_DIR)/latency_test.h
+$(OBJ_DIR)/main.o: $(SRC_DIR)/main.c $(INC_DIR)/common.h $(INC_DIR)/config.h $(INC_DIR)/hw_timestamp.h $(INC_DIR)/latency_test.h $(SHARED_DIR)/latency_results_shm.h
 $(OBJ_DIR)/hw_timestamp.o: $(SRC_DIR)/hw_timestamp.c $(INC_DIR)/hw_timestamp.h $(INC_DIR)/common.h
 $(OBJ_DIR)/packet.o: $(SRC_DIR)/packet.c $(INC_DIR)/packet.h $(INC_DIR)/config.h $(INC_DIR)/common.h
 $(OBJ_DIR)/latency_test.o: $(SRC_DIR)/latency_test.c $(INC_DIR)/latency_test.h $(INC_DIR)/hw_timestamp.h $(INC_DIR)/packet.h $(INC_DIR)/common.h $(INC_DIR)/config.h

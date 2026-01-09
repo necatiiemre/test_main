@@ -13,10 +13,16 @@
 #include "tx_rx_manager.h"
 #include "raw_socket_port.h"  // Raw socket port support (non-DPDK NICs)
 #include "dpdk_external_tx.h" // DPDK External TX (independent system)
+#include "mellanox_hw_latency.h" // Mellanox HW timestamp latency test (integrated)
 
 // Enable/disable raw socket ports
 #ifndef ENABLE_RAW_SOCKET_PORTS
 #define ENABLE_RAW_SOCKET_PORTS 1
+#endif
+
+// Enable/disable Mellanox HW latency test (runs BEFORE DPDK EAL init)
+#ifndef MELLANOX_HW_LATENCY_ENABLED
+#define MELLANOX_HW_LATENCY_ENABLED 1
 #endif
 
 // force_quit ve signal_handler genelde helpers.h içinde deklarasyon/definasyona sahiptir.
@@ -46,7 +52,52 @@ int main(int argc, char const *argv[])
     printf("  - Port 13 (100M): 1 target\n");
     printf("      -> P12: 80 Mbps\n");
 #endif
+#if MELLANOX_HW_LATENCY_ENABLED
+    printf("Mellanox HW Latency: Enabled (runs before DPDK init)\n");
+#endif
     printf("\n");
+
+    // =========================================================================
+    // MELLANOX HW TIMESTAMP LATENCY TEST (BEFORE DPDK EAL INIT!)
+    // =========================================================================
+    // Raw socket kullandığı için DPDK port'ları almadan önce çalışmalı.
+    // Sonuçlar g_mellanox_latency_summary global struct'ında saklanır.
+    // =========================================================================
+#if MELLANOX_HW_LATENCY_ENABLED
+    int mlx_ret = run_mellanox_hw_latency_test(1, 1);  // 1 packet, verbose=1
+    if (mlx_ret < 0) {
+        printf("Warning: Mellanox HW latency test failed with error: %d\n", mlx_ret);
+        printf("Continuing with DPDK initialization...\n");
+    } else if (mlx_ret > 0) {
+        printf("Warning: Mellanox HW latency test: %d VLANs failed threshold\n", mlx_ret);
+    }
+
+    // Sonuçlara erişim örneği:
+    if (g_mellanox_latency_summary.test_completed) {
+        printf("\n");
+        printf("╔══════════════════════════════════════════════════════════════════╗\n");
+        printf("║  MELLANOX HW LATENCY RESULTS (Available in DPDK code)            ║\n");
+        printf("╠══════════════════════════════════════════════════════════════════╣\n");
+        printf("║  Global Avg: %.2f us | Min: %.2f us | Max: %.2f us             ║\n",
+               g_mellanox_latency_summary.global_avg_us,
+               g_mellanox_latency_summary.global_min_us,
+               g_mellanox_latency_summary.global_max_us);
+        printf("║  Status: %s                                                    ║\n",
+               g_mellanox_latency_summary.test_passed ? "ALL PASS" : "FAILED  ");
+        printf("╚══════════════════════════════════════════════════════════════════╝\n");
+        printf("\n");
+
+        // Per-port latency örneği (DPDK worker'lardan erişilebilir)
+        printf("Per-port average latency (accessible via get_port_avg_latency_us()):\n");
+        for (int p = 0; p < MLX_MAX_PORT_PAIRS; p++) {
+            double avg = get_port_avg_latency_us((uint16_t)p);
+            if (avg >= 0) {
+                printf("  Port %d: %.2f us\n", p, avg);
+            }
+        }
+        printf("\n");
+    }
+#endif
 
     // Initialize DPDK EAL
     initialize_eal(argc, argv);

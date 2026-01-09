@@ -20,31 +20,146 @@ Dtn::~Dtn()
 {
 }
 
+bool Dtn::loopbackTestSequence()
+{
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                    LOOPBACK TEST CONFIGURATION                   ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
+
+    while (true)
+    {
+        // Ask if user wants loopback test
+        if (!askQuestion("Do you want to run Loopback Test?"))
+        {
+            // User doesn't want loopback test - use default
+            std::cout << std::endl;
+            std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+            std::cout << "║     LOOPBACK TEST SKIPPED - Using Default 14.0 us               ║" << std::endl;
+            std::cout << "╚══════════════════════════════════════════════════════════════════╝" << std::endl;
+            std::cout << std::endl;
+            m_loopbackTestCompleted = false;
+            m_loopbackUsedDefault = true;
+            return false;
+        }
+
+        // User wants loopback test - check if cables are connected
+        std::cout << std::endl;
+        std::cout << "NOTE: Loopback test requires direct loopback cables connected." << std::endl;
+        std::cout << "      Each port should have a cable looping back to itself." << std::endl;
+        std::cout << std::endl;
+
+        if (askQuestion("Are loopback cables connected?"))
+        {
+            // Cables are connected - run loopback test
+            std::cout << std::endl;
+            std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+            std::cout << "║              LOOPBACK TEST (NIC Latency Measurement)             ║" << std::endl;
+            std::cout << "╚══════════════════════════════════════════════════════════════════╝" << std::endl;
+            std::cout << std::endl;
+
+            bool result = runMellanoxLatencyTest("-n 1 -v", 60);  // Loopback mode (default)
+            m_loopbackTestCompleted = result;
+            m_loopbackUsedDefault = false;
+
+            std::cout << std::endl;
+            std::cout << "=== LOOPBACK TEST " << (result ? "COMPLETED" : "FAILED") << " ===" << std::endl;
+            return result;
+        }
+
+        // Cables not connected - ask again
+        std::cout << std::endl;
+        std::cout << "Loopback cables are not connected." << std::endl;
+        std::cout << "Please connect cables and try again, or skip loopback test." << std::endl;
+        std::cout << std::endl;
+        // Loop back to ask if they want loopback test again
+    }
+}
+
+bool Dtn::unitTestSequence()
+{
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║         UNIT TEST (End-to-End Latency Through Switch)            ║" << std::endl;
+    std::cout << "║         Port Mapping: 0↔1, 2↔3, 4↔5, 6↔7                        ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
+
+    // Unit test always runs - use --unit-mode flag
+    bool result = runMellanoxLatencyTest("-n 1 -v --unit-mode", 60);
+    m_unitTestCompleted = result;
+
+    std::cout << std::endl;
+    std::cout << "=== UNIT TEST " << (result ? "COMPLETED" : "FAILED") << " ===" << std::endl;
+    return result;
+}
+
+bool Dtn::completeLatencyTestSequence()
+{
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║              COMPLETE LATENCY TEST SEQUENCE                      ║" << std::endl;
+    std::cout << "║   1. Loopback Test (Optional) - NIC latency measurement          ║" << std::endl;
+    std::cout << "║   2. Unit Test (Always) - End-to-end through switch              ║" << std::endl;
+    std::cout << "║   3. Calculate Net Latency = Unit - Loopback                     ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
+
+    // Step 1: Interactive loopback test (optional)
+    loopbackTestSequence();
+
+    // Step 2: Unit test (always runs)
+    if (!unitTestSequence())
+    {
+        std::cout << "Unit test failed, cannot continue." << std::endl;
+        return false;
+    }
+
+    // Step 3: Print combined results
+    printCombinedLatencySummary();
+
+    return true;
+}
+
+void Dtn::printCombinedLatencySummary()
+{
+    std::cout << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                    COMBINED LATENCY RESULTS                              ║" << std::endl;
+    std::cout << "╠══════════════════════════════════════════════════════════════════════════╣" << std::endl;
+
+    if (m_loopbackUsedDefault)
+    {
+        std::cout << "║  Loopback Test: SKIPPED (using default 14.0 us)                         ║" << std::endl;
+    }
+    else if (m_loopbackTestCompleted)
+    {
+        std::cout << "║  Loopback Test: COMPLETED                                               ║" << std::endl;
+    }
+    else
+    {
+        std::cout << "║  Loopback Test: FAILED                                                  ║" << std::endl;
+    }
+
+    std::cout << "║  Unit Test:     " << (m_unitTestCompleted ? "COMPLETED" : "FAILED   ") << "                                               ║" << std::endl;
+    std::cout << "╠══════════════════════════════════════════════════════════════════════════╣" << std::endl;
+    std::cout << "║  Note: Detailed per-port results available in DPDK application           ║" << std::endl;
+    std::cout << "║        via g_loopback_result, g_unit_result, g_combined_result           ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "Legend:" << std::endl;
+    std::cout << "  Loopback: NIC latency only (direct cable or default 14.0 us)" << std::endl;
+    std::cout << "  Unit:     Total end-to-end latency (NIC + Switch + Cable)" << std::endl;
+    std::cout << "  Net:      Pure switch/unit latency (Unit - Loopback)" << std::endl;
+    std::cout << std::endl;
+}
+
+// Legacy function for backward compatibility
 bool Dtn::mellanoxLatencyTestSequence()
 {
-    bool valid_test = false;
-
-    if (askQuestion("Do you want to run Mellanox HW Timestamp Latency Test (Default measured latency : 14us)"))
-    {
-        while (!valid_test)
-        {
-            bool answer = askQuestion("You need to install the LoopBack connectors for this test. Check before starting the test. Should I start the test?");
-            if (answer)
-            {
-                valid_test = true;
-                runMellanoxLatencyTest("-n 1 -vvv");
-            }
-            else
-            {
-                if (askQuestion("Do you want to skip the test?"))
-                {
-                    valid_test = true;
-                    return 1;
-                }
-            }
-        }
-    }
-    return 0;
+    return completeLatencyTestSequence();
 }
 
 bool Dtn::askQuestion(const std::string &question)

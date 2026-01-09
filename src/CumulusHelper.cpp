@@ -1365,10 +1365,11 @@ bool CumulusHelper::deployNetworkInterfaces(const std::string& local_interfaces_
     }
     else
     {
-        // Search locations: current dir, parent dir (project root from build/)
+        // Search locations: current dir, parent dir, grandparent dir (project root from build/bin/)
         std::vector<std::filesystem::path> search_paths = {
             std::filesystem::current_path() / input_path,
-            std::filesystem::current_path().parent_path() / input_path
+            std::filesystem::current_path().parent_path() / input_path,
+            std::filesystem::current_path().parent_path().parent_path() / input_path
         };
 
         for (const auto& path : search_paths)

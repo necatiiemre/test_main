@@ -1,6 +1,6 @@
 /**
  * @file packet.h
- * @brief Mellanox HW Timestamp Latency Test - Packet Building API
+ * @brief HW Timestamp Latency Test - Packet Building API
  *
  * DPDK formatı ile uyumlu paket oluşturma
  * Format: ETH + VLAN(802.1Q) + IP + UDP + Payload

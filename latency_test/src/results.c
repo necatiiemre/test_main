@@ -1,6 +1,6 @@
 /**
  * @file results.c
- * @brief Mellanox HW Timestamp Latency Test - Results Output
+ * @brief HW Timestamp Latency Test - Results Output
  *
  * ASCII tablo formatında sonuç gösterimi (DPDK formatı ile uyumlu)
  */

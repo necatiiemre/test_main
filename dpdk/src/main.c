@@ -13,10 +13,16 @@
 #include "tx_rx_manager.h"
 #include "raw_socket_port.h"  // Raw socket port support (non-DPDK NICs)
 #include "dpdk_external_tx.h" // DPDK External TX (independent system)
+#include "embedded_latency/embedded_latency.h"  // Embedded HW timestamp latency test
 
 // Enable/disable raw socket ports
 #ifndef ENABLE_RAW_SOCKET_PORTS
 #define ENABLE_RAW_SOCKET_PORTS 1
+#endif
+
+// Enable/disable embedded HW timestamp latency test (runs BEFORE DPDK EAL init)
+#ifndef EMBEDDED_HW_LATENCY_TEST
+#define EMBEDDED_HW_LATENCY_TEST 1
 #endif
 
 // force_quit ve signal_handler genelde helpers.h içinde deklarasyon/definasyona sahiptir.
@@ -46,7 +52,41 @@ int main(int argc, char const *argv[])
     printf("  - Port 13 (100M): 1 target\n");
     printf("      -> P12: 80 Mbps\n");
 #endif
+#if EMBEDDED_HW_LATENCY_TEST
+    printf("Embedded HW Latency Test: Enabled (runs before DPDK init)\n");
+#endif
     printf("\n");
+
+    // =========================================================================
+    // EMBEDDED HW TIMESTAMP LATENCY TEST (runs BEFORE DPDK takes over NICs!)
+    // Full sequence: Loopback (switch) + Unit Test (device) + Combined Results
+    // =========================================================================
+#if EMBEDDED_HW_LATENCY_TEST
+    // Full interactive sequence:
+    // 1. Loopback test (Mellanox switch latency) - or use default 14µs
+    // 2. Unit test (device latency) - port pairs 0↔1, 2↔3, 4↔5, 6↔7
+    // 3. Combined results: unit_latency = total - switch
+    int latency_fails = emb_latency_full_sequence();
+
+    if (emb_latency_completed()) {
+        if (latency_fails > 0) {
+            printf("\n*** WARNING: %d test(s) failed! ***\n\n", latency_fails);
+        } else {
+            printf("\n*** All latency tests PASSED! ***\n\n");
+        }
+
+        // Örnek: Port pair 0-1 için tüm gecikme değerlerini al
+        // double switch_us, total_us, unit_us;
+        // if (emb_latency_get_all_us(0, &switch_us, &total_us, &unit_us)) {
+        //     printf("Port 0-1: Switch=%.2f µs, Total=%.2f µs, Unit=%.2f µs\n",
+        //            switch_us, total_us, unit_us);
+        // }
+
+        printf("=== Latency test sequence complete, initializing DPDK ===\n\n");
+    } else {
+        printf("=== Latency test skipped, initializing DPDK ===\n\n");
+    }
+#endif
 
     // Initialize DPDK EAL
     initialize_eal(argc, argv);

@@ -1,8 +1,8 @@
 /**
  * @file hw_timestamp.h
- * @brief Mellanox HW Timestamp Latency Test - Hardware Timestamping API
+ * @brief HW Timestamp Latency Test - Hardware Timestamping API
  *
- * SO_TIMESTAMPING ile Mellanox NIC'lerden PTP hardware timestamp alma
+ * SO_TIMESTAMPING ile NIC'lerden PTP hardware timestamp alma
  */
 
 #ifndef HW_TIMESTAMP_H

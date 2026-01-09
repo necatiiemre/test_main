@@ -1,6 +1,6 @@
 /**
  * @file packet.c
- * @brief Mellanox HW Timestamp Latency Test - Packet Building Implementation
+ * @brief HW Timestamp Latency Test - Packet Building Implementation
  *
  * DPDK formatı ile uyumlu paket oluşturma
  */

@@ -1,6 +1,6 @@
 /**
  * @file common.h
- * @brief Mellanox HW Timestamp Latency Test - Common definitions and debug macros
+ * @brief HW Timestamp Latency Test - Common definitions and debug macros
  */
 
 #ifndef COMMON_H

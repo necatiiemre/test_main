@@ -1,6 +1,6 @@
 /**
  * @file latency_test.h
- * @brief Mellanox HW Timestamp Latency Test - Test Logic API
+ * @brief HW Timestamp Latency Test - Test Logic API
  */
 
 #ifndef LATENCY_TEST_H

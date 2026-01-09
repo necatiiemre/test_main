@@ -1,6 +1,6 @@
 /**
  * @file latency_test.c
- * @brief Mellanox HW Timestamp Latency Test - Test Logic Implementation
+ * @brief HW Timestamp Latency Test - Test Logic Implementation
  *
  * Ana test mantığı:
  * - Her port çifti için soket aç (bir kez)

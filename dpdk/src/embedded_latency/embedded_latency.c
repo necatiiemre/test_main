@@ -934,6 +934,14 @@ int emb_latency_full_sequence(void) {
     printf("This test measures total latency through the device.\n");
     printf("Port pairs: 0↔1, 2↔3, 4↔5, 6↔7\n\n");
 
+    // Ask user to change cables for unit test
+    while (1) {
+        if (ask_question("Have you changed to Unit Test cables? (Port pairs: 0-1, 2-3, 4-5, 6-7)")) {
+            break;
+        }
+        printf("\nPlease change to Unit Test cables and confirm when ready.\n\n");
+    }
+
     int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // Higher threshold for unit test
     total_fails += unit_fails;
 

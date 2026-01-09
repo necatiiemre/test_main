@@ -239,7 +239,7 @@ bool is_our_test_packet(const uint8_t *packet,
     return true;
 }
 
-void print_packet_info(const uint8_t *packet, size_t packet_len) {
+void mlx_print_packet_info(const uint8_t *packet, size_t packet_len) {
     if (packet_len < TOTAL_HDR_SIZE) {
         printf("Packet too short: %zu bytes\n", packet_len);
         return;

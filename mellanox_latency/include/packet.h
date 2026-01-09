@@ -130,6 +130,6 @@ bool is_our_test_packet(const uint8_t *packet,
  * @param packet        Paket verisi
  * @param packet_len    Paket uzunluğu
  */
-void print_packet_info(const uint8_t *packet, size_t packet_len);
+void mlx_print_packet_info(const uint8_t *packet, size_t packet_len);
 
 #endif // PACKET_H

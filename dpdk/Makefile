@@ -6,6 +6,7 @@ CC = gcc
 SRCDIR = src
 INCDIR = include
 SHAREDDIR = ../shared
+EMBLATDIR = src/embedded_latency
 
 NUM_TX_CORES ?= 4
 NUM_RX_CORES ?= 4
@@ -18,14 +19,14 @@ USE_VLAN ?=1
 ENABLE_RAW_SOCKET_PORTS ?= 1
 
 # Compiler flags
-CFLAGS = -O3 -march=native -flto -ffast-math -funroll-loops -Wextra -I$(INCDIR) -I$(SHAREDDIR) -DNUM_TX_CORES=$(NUM_TX_CORES) -DNUM_RX_CORES=$(NUM_RX_CORES) -DUSE_VLAN=$(USE_VLAN) -DTARGET_GBPS_FAST=$(TARGET_GBPS_FAST) -DTARGET_GBPS_MID=$(TARGET_GBPS_MID) -DTARGET_GBPS_SLOW=$(TARGET_GBPS_SLOW) -DENABLE_RAW_SOCKET_PORTS=$(ENABLE_RAW_SOCKET_PORTS)
-DEBUG_CFLAGS = -g -O3 -DDEBUG -march=native -Wall -Wextra -I$(INCDIR) -I$(SHAREDDIR) -DENABLE_RAW_SOCKET_PORTS=$(ENABLE_RAW_SOCKET_PORTS)
+CFLAGS = -O3 -march=native -flto -ffast-math -funroll-loops -Wextra -I$(INCDIR) -I$(SHAREDDIR) -I$(SRCDIR) -DNUM_TX_CORES=$(NUM_TX_CORES) -DNUM_RX_CORES=$(NUM_RX_CORES) -DUSE_VLAN=$(USE_VLAN) -DTARGET_GBPS_FAST=$(TARGET_GBPS_FAST) -DTARGET_GBPS_MID=$(TARGET_GBPS_MID) -DTARGET_GBPS_SLOW=$(TARGET_GBPS_SLOW) -DENABLE_RAW_SOCKET_PORTS=$(ENABLE_RAW_SOCKET_PORTS)
+DEBUG_CFLAGS = -g -O3 -DDEBUG -march=native -Wall -Wextra -I$(INCDIR) -I$(SHAREDDIR) -I$(SRCDIR) -DENABLE_RAW_SOCKET_PORTS=$(ENABLE_RAW_SOCKET_PORTS)
 
 # Additional libraries for raw socket ports (pthread for threading, rt for shared memory)
 EXTRA_LIBS = -lpthread -lrt
 
-# Source files (include shared sources)
-SOURCES = $(wildcard $(SRCDIR)/*.c) $(SHAREDDIR)/latency_results_shm.c
+# Source files (include shared sources and embedded latency)
+SOURCES = $(wildcard $(SRCDIR)/*.c) $(wildcard $(EMBLATDIR)/*.c) $(SHAREDDIR)/latency_results_shm.c
 
 # DPDK flags
 DPDK_FLAGS = $(shell pkg-config --cflags --libs libdpdk)

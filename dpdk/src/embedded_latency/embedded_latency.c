@@ -34,6 +34,38 @@
 struct emb_latency_state g_emb_latency = {0};
 
 // ============================================
+// USER INTERACTION
+// ============================================
+
+/**
+ * Ask a yes/no question to the user
+ * @param question  Question text
+ * @return          true = yes, false = no
+ */
+static bool ask_question(const char *question) {
+    char response;
+    int c;
+
+    while (1) {
+        printf("%s [y/n]: ", question);
+        fflush(stdout);
+
+        response = getchar();
+
+        // Clear rest of line
+        while ((c = getchar()) != '\n' && c != EOF);
+
+        if (response == 'y' || response == 'Y') {
+            return true;
+        } else if (response == 'n' || response == 'N') {
+            return false;
+        }
+
+        printf("Invalid input! Please enter 'y' or 'n'.\n");
+    }
+}
+
+// ============================================
 // CONFIGURATION (same as latency_test)
 // ============================================
 
@@ -450,6 +482,45 @@ int emb_latency_run(int packet_count, int timeout_ms, int max_latency_us) {
 
 int emb_latency_run_default(void) {
     return emb_latency_run(1, 100, 30);  // 1 packet, 100ms timeout, 30us max
+}
+
+/**
+ * Interactive latency test with user prompts
+ * Follows the same pattern as Dtn.cpp latencyTestSequence()
+ *
+ * @return  0 = all passed/skipped, >0 = fail count, <0 = error
+ */
+int emb_latency_run_interactive(void) {
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║         HW TIMESTAMP LATENCY TEST (INTERACTIVE MODE)             ║\n");
+    printf("║  Default measured latency: ~14us | Max threshold: 30us           ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    // Ask if user wants to run the test
+    if (!ask_question("Do you want to run HW Timestamp Latency Test?")) {
+        printf("Latency test skipped by user.\n\n");
+        return 0;  // Skipped = success
+    }
+
+    // Loop until valid test or skip
+    while (1) {
+        if (ask_question("You need to install the LoopBack connectors for this test.\n"
+                        "Check before starting the test. Should I start the test?")) {
+            // User confirmed loopback connectors are installed
+            printf("\nStarting latency test...\n");
+            return emb_latency_run_default();
+        } else {
+            // User said no - ask if they want to skip
+            if (ask_question("Do you want to skip the test?")) {
+                printf("Latency test skipped by user.\n\n");
+                return 0;  // Skipped = success
+            }
+            // Otherwise loop back and ask again
+            printf("\nPlease install the LoopBack connectors and try again.\n\n");
+        }
+    }
 }
 
 // ============================================

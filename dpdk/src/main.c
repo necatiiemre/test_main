@@ -61,26 +61,29 @@ int main(int argc, char const *argv[])
     // EMBEDDED HW TIMESTAMP LATENCY TEST (runs BEFORE DPDK takes over NICs!)
     // =========================================================================
 #if EMBEDDED_HW_LATENCY_TEST
-    printf("=== Running Embedded HW Timestamp Latency Test ===\n");
-    printf("(This runs BEFORE DPDK initializes - using raw sockets)\n\n");
+    // Interactive mode: Ask user if they want to run the test
+    int latency_fails = emb_latency_run_interactive();
 
-    int latency_fails = emb_latency_run_default();
+    if (emb_latency_completed()) {
+        // Test was actually run (not skipped)
+        if (latency_fails > 0) {
+            printf("\n*** WARNING: %d VLAN(s) failed latency test! ***\n\n", latency_fails);
+        } else if (latency_fails == 0) {
+            printf("\n*** All latency tests PASSED! ***\n\n");
+        } else {
+            printf("\n*** Latency test error: %d ***\n\n", latency_fails);
+        }
 
-    if (latency_fails > 0) {
-        printf("\n*** WARNING: %d VLAN(s) failed latency test! ***\n\n", latency_fails);
-    } else if (latency_fails == 0) {
-        printf("\n*** All latency tests PASSED! ***\n\n");
+        // Sonuçlara erişim örneği:
+        // const struct emb_latency_result *r = emb_latency_get_by_vlan(105);
+        // if (r && r->valid) {
+        //     printf("VLAN 105: %.2f us\n", r->avg_latency_ns / 1000.0);
+        // }
+
+        printf("=== Latency test complete, initializing DPDK ===\n\n");
     } else {
-        printf("\n*** Latency test error: %d ***\n\n", latency_fails);
+        printf("=== Latency test skipped, initializing DPDK ===\n\n");
     }
-
-    // Sonuçlara erişim örneği:
-    // const struct emb_latency_result *r = emb_latency_get_by_vlan(105);
-    // if (r && r->valid) {
-    //     printf("VLAN 105: %.2f us\n", r->avg_latency_ns / 1000.0);
-    // }
-
-    printf("=== Latency test complete, initializing DPDK ===\n\n");
 #endif
 
     // Initialize DPDK EAL

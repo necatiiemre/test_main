@@ -89,6 +89,15 @@ int emb_latency_run(int packet_count, int timeout_ms, int max_latency_us);
 int emb_latency_run_default(void);
 
 /**
+ * Interactive run with user prompts
+ * Asks user if they want to run test and if loopback connectors are installed.
+ * Same pattern as Dtn.cpp latencyTestSequence()
+ *
+ * @return 0 = all passed or skipped, >0 = fail count, <0 = error
+ */
+int emb_latency_run_interactive(void);
+
+/**
  * Check if test completed
  */
 bool emb_latency_completed(void);

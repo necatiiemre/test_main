@@ -1353,6 +1353,16 @@ bool CumulusHelper::deployNetworkInterfaces(const std::string& local_interfaces_
     std::cout << getLogPrefix() << " Deploying Network Interfaces" << std::endl;
     std::cout << "========================================" << std::endl;
 
+    // Resolve relative paths to absolute paths
+    std::filesystem::path interfaces_path(local_interfaces_path);
+    if (interfaces_path.is_relative())
+    {
+        interfaces_path = std::filesystem::current_path() / interfaces_path;
+    }
+    std::string resolved_path = interfaces_path.string();
+
+    std::cout << getLogPrefix() << " Using interfaces file: " << resolved_path << std::endl;
+
     // 1. Test connection
     std::cout << getLogPrefix() << " [Step 1/3] Testing connection..." << std::endl;
     if (!connect())
@@ -1363,7 +1373,7 @@ bool CumulusHelper::deployNetworkInterfaces(const std::string& local_interfaces_
 
     // 2. Copy interfaces file to /etc/network/interfaces (with sudo)
     std::cout << getLogPrefix() << " [Step 2/3] Copying interfaces file..." << std::endl;
-    if (!g_ssh_deployer_cumulus.copyFileToPath(local_interfaces_path, "/etc/network/interfaces", true))
+    if (!g_ssh_deployer_cumulus.copyFileToPath(resolved_path, "/etc/network/interfaces", true))
     {
         std::cerr << getLogPrefix() << " Deploy failed: Cannot copy interfaces file" << std::endl;
         return false;

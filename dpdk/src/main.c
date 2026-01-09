@@ -13,10 +13,16 @@
 #include "tx_rx_manager.h"
 #include "raw_socket_port.h"  // Raw socket port support (non-DPDK NICs)
 #include "dpdk_external_tx.h" // DPDK External TX (independent system)
+#include "embedded_latency/embedded_latency.h"  // Embedded HW timestamp latency test
 
 // Enable/disable raw socket ports
 #ifndef ENABLE_RAW_SOCKET_PORTS
 #define ENABLE_RAW_SOCKET_PORTS 1
+#endif
+
+// Enable/disable embedded HW timestamp latency test (runs BEFORE DPDK EAL init)
+#ifndef EMBEDDED_HW_LATENCY_TEST
+#define EMBEDDED_HW_LATENCY_TEST 1
 #endif
 
 // force_quit ve signal_handler genelde helpers.h içinde deklarasyon/definasyona sahiptir.
@@ -46,7 +52,36 @@ int main(int argc, char const *argv[])
     printf("  - Port 13 (100M): 1 target\n");
     printf("      -> P12: 80 Mbps\n");
 #endif
+#if EMBEDDED_HW_LATENCY_TEST
+    printf("Embedded HW Latency Test: Enabled (runs before DPDK init)\n");
+#endif
     printf("\n");
+
+    // =========================================================================
+    // EMBEDDED HW TIMESTAMP LATENCY TEST (runs BEFORE DPDK takes over NICs!)
+    // =========================================================================
+#if EMBEDDED_HW_LATENCY_TEST
+    printf("=== Running Embedded HW Timestamp Latency Test ===\n");
+    printf("(This runs BEFORE DPDK initializes - using raw sockets)\n\n");
+
+    int latency_fails = emb_latency_run_default();
+
+    if (latency_fails > 0) {
+        printf("\n*** WARNING: %d VLAN(s) failed latency test! ***\n\n", latency_fails);
+    } else if (latency_fails == 0) {
+        printf("\n*** All latency tests PASSED! ***\n\n");
+    } else {
+        printf("\n*** Latency test error: %d ***\n\n", latency_fails);
+    }
+
+    // Sonuçlara erişim örneği:
+    // const struct emb_latency_result *r = emb_latency_get_by_vlan(105);
+    // if (r && r->valid) {
+    //     printf("VLAN 105: %.2f us\n", r->avg_latency_ns / 1000.0);
+    // }
+
+    printf("=== Latency test complete, initializing DPDK ===\n\n");
+#endif
 
     // Initialize DPDK EAL
     initialize_eal(argc, argv);

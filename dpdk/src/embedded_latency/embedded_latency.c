@@ -1,0 +1,537 @@
+/**
+ * @file embedded_latency.c
+ * @brief Embedded HW Timestamp Latency Test Implementation
+ *
+ * Raw socket + SO_TIMESTAMPING ile NIC HW timestamp kullanarak
+ * latency ölçümü yapar.
+ *
+ * DPDK EAL başlamadan önce çalıştırılmalı!
+ */
+
+#include "embedded_latency.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <signal.h>
+#include <poll.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <linux/net_tstamp.h>
+#include <linux/sockios.h>
+#include <linux/ethtool.h>
+#include <arpa/inet.h>
+
+// ============================================
+// GLOBAL STATE
+// ============================================
+struct emb_latency_state g_emb_latency = {0};
+
+// ============================================
+// CONFIGURATION (same as latency_test)
+// ============================================
+
+// Port pairs - TX -> RX mapping
+static const struct {
+    uint16_t tx_port;
+    const char *tx_iface;
+    uint16_t rx_port;
+    const char *rx_iface;
+    uint16_t vlans[4];
+    uint16_t vl_ids[4];
+    int vlan_count;
+} PORT_PAIRS[] = {
+    {0, "ens2f0np0", 7, "ens5f1np1", {105, 106, 107, 108}, {1027, 1155, 1283, 1411}, 4},
+    {1, "ens2f1np1", 6, "ens5f0np0", {109, 110, 111, 112}, {1539, 1667, 1795, 1923}, 4},
+    {2, "ens1f0np0", 5, "ens3f1np1", {97,  98,  99,  100}, {3,    131,  259,  387 }, 4},
+    {3, "ens1f1np1", 4, "ens3f0np0", {101, 102, 103, 104}, {515,  643,  771,  899 }, 4},
+    {4, "ens3f0np0", 3, "ens1f1np1", {113, 114, 115, 116}, {2051, 2179, 2307, 2435}, 4},
+    {5, "ens3f1np1", 2, "ens1f0np0", {117, 118, 119, 120}, {2563, 2691, 2819, 2947}, 4},
+    {6, "ens5f0np0", 1, "ens2f1np1", {121, 122, 123, 124}, {3075, 3203, 3331, 3459}, 4},
+    {7, "ens5f1np1", 0, "ens2f0np0", {125, 126, 127, 128}, {3587, 3715, 3843, 3971}, 4},
+};
+#define NUM_PORT_PAIRS (sizeof(PORT_PAIRS) / sizeof(PORT_PAIRS[0]))
+
+// Packet config
+#define PACKET_SIZE     1518
+#define ETH_P_8021Q     0x8100
+#define ETH_P_IP        0x0800
+
+// Source MAC
+static const uint8_t SRC_MAC[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x20};
+// Dest MAC prefix
+static const uint8_t DST_MAC_PREFIX[4] = {0x03, 0x00, 0x00, 0x00};
+
+// ============================================
+// HELPERS
+// ============================================
+
+static uint64_t get_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static double ns_to_us(uint64_t ns) {
+    return (double)ns / 1000.0;
+}
+
+// ============================================
+// HW TIMESTAMP SOCKET
+// ============================================
+
+static int create_raw_socket(const char *ifname, int *if_index) {
+    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (fd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    // Get interface index
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+        perror("SIOCGIFINDEX");
+        close(fd);
+        return -1;
+    }
+    *if_index = ifr.ifr_ifindex;
+
+    // Bind to interface
+    struct sockaddr_ll sll = {0};
+    sll.sll_family = AF_PACKET;
+    sll.sll_protocol = htons(ETH_P_ALL);
+    sll.sll_ifindex = *if_index;
+
+    if (bind(fd, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
+        perror("bind");
+        close(fd);
+        return -1;
+    }
+
+    // Enable HW timestamping
+    struct hwtstamp_config hwconfig = {0};
+    hwconfig.tx_type = HWTSTAMP_TX_ON;
+    hwconfig.rx_filter = HWTSTAMP_FILTER_ALL;
+
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    ifr.ifr_data = (void *)&hwconfig;
+
+    if (ioctl(fd, SIOCSHWTSTAMP, &ifr) < 0) {
+        // Some NICs don't support this, continue anyway
+    }
+
+    // Request timestamps via socket option
+    int flags = SOF_TIMESTAMPING_TX_HARDWARE |
+                SOF_TIMESTAMPING_RX_HARDWARE |
+                SOF_TIMESTAMPING_RAW_HARDWARE |
+                SOF_TIMESTAMPING_SOFTWARE |
+                SOF_TIMESTAMPING_TX_SOFTWARE |
+                SOF_TIMESTAMPING_RX_SOFTWARE;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags)) < 0) {
+        perror("SO_TIMESTAMPING");
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+// ============================================
+// PACKET BUILDING
+// ============================================
+
+static int build_packet(uint8_t *buf, uint16_t vlan_id, uint16_t vl_id, uint64_t seq) {
+    memset(buf, 0, PACKET_SIZE);
+    int offset = 0;
+
+    // Ethernet header
+    // Dest MAC: 03:00:00:00:VL_HI:VL_LO
+    buf[offset++] = DST_MAC_PREFIX[0];
+    buf[offset++] = DST_MAC_PREFIX[1];
+    buf[offset++] = DST_MAC_PREFIX[2];
+    buf[offset++] = DST_MAC_PREFIX[3];
+    buf[offset++] = (vl_id >> 8) & 0xFF;
+    buf[offset++] = vl_id & 0xFF;
+
+    // Source MAC
+    memcpy(buf + offset, SRC_MAC, 6);
+    offset += 6;
+
+    // VLAN tag (802.1Q)
+    buf[offset++] = (ETH_P_8021Q >> 8) & 0xFF;
+    buf[offset++] = ETH_P_8021Q & 0xFF;
+    buf[offset++] = (vlan_id >> 8) & 0xFF;
+    buf[offset++] = vlan_id & 0xFF;
+
+    // EtherType: IP
+    buf[offset++] = (ETH_P_IP >> 8) & 0xFF;
+    buf[offset++] = ETH_P_IP & 0xFF;
+
+    // IP header (minimal)
+    buf[offset++] = 0x45;  // Version + IHL
+    buf[offset++] = 0x00;  // TOS
+    uint16_t ip_len = PACKET_SIZE - 14 - 4;  // Total - ETH - VLAN
+    buf[offset++] = (ip_len >> 8) & 0xFF;
+    buf[offset++] = ip_len & 0xFF;
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // ID
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Flags + Fragment
+    buf[offset++] = 0x01;  // TTL
+    buf[offset++] = 0x11;  // Protocol: UDP
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum (0 = ignore)
+
+    // Source IP: 10.0.0.0
+    buf[offset++] = 10; buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0;
+
+    // Dest IP: 224.224.VL_HI.VL_LO
+    buf[offset++] = 224;
+    buf[offset++] = 224;
+    buf[offset++] = (vl_id >> 8) & 0xFF;
+    buf[offset++] = vl_id & 0xFF;
+
+    // UDP header
+    buf[offset++] = 0x00; buf[offset++] = 0x64;  // Src port: 100
+    buf[offset++] = 0x00; buf[offset++] = 0x64;  // Dst port: 100
+    uint16_t udp_len = ip_len - 20;
+    buf[offset++] = (udp_len >> 8) & 0xFF;
+    buf[offset++] = udp_len & 0xFF;
+    buf[offset++] = 0x00; buf[offset++] = 0x00;  // Checksum
+
+    // Sequence number (8 bytes)
+    for (int i = 7; i >= 0; i--) {
+        buf[offset++] = (seq >> (i * 8)) & 0xFF;
+    }
+
+    return PACKET_SIZE;
+}
+
+// ============================================
+// TIMESTAMP EXTRACTION
+// ============================================
+
+static bool extract_timestamp(struct msghdr *msg, uint64_t *ts_ns) {
+    struct cmsghdr *cmsg;
+
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_TIMESTAMPING) {
+            struct timespec *ts = (struct timespec *)CMSG_DATA(cmsg);
+            // ts[0] = software, ts[1] = deprecated, ts[2] = hardware
+            if (ts[2].tv_sec != 0 || ts[2].tv_nsec != 0) {
+                *ts_ns = (uint64_t)ts[2].tv_sec * 1000000000ULL + ts[2].tv_nsec;
+                return true;
+            }
+            if (ts[0].tv_sec != 0 || ts[0].tv_nsec != 0) {
+                *ts_ns = (uint64_t)ts[0].tv_sec * 1000000000ULL + ts[0].tv_nsec;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// ============================================
+// SINGLE TEST
+// ============================================
+
+static int run_single_test(int tx_fd, int rx_fd, int tx_ifindex,
+                           uint16_t tx_port, uint16_t rx_port,
+                           uint16_t vlan_id, uint16_t vl_id,
+                           int packet_count, int timeout_ms,
+                           uint64_t max_latency_ns,
+                           struct emb_latency_result *result) {
+
+    memset(result, 0, sizeof(*result));
+    result->tx_port = tx_port;
+    result->rx_port = rx_port;
+    result->vlan_id = vlan_id;
+    result->vl_id = vl_id;
+    result->min_latency_ns = UINT64_MAX;
+
+    uint8_t tx_buf[2048];
+    uint8_t rx_buf[2048];
+    char ctrl_buf[1024];
+
+    uint64_t total_latency = 0;
+
+    for (int pkt = 0; pkt < packet_count; pkt++) {
+        uint64_t seq = ((uint64_t)vlan_id << 32) | pkt;
+
+        // Build packet
+        int pkt_len = build_packet(tx_buf, vlan_id, vl_id, seq);
+
+        // Send
+        struct sockaddr_ll sll = {0};
+        sll.sll_family = AF_PACKET;
+        sll.sll_ifindex = tx_ifindex;
+        sll.sll_halen = 6;
+        memcpy(sll.sll_addr, tx_buf, 6);
+
+        ssize_t sent = sendto(tx_fd, tx_buf, pkt_len, 0,
+                              (struct sockaddr *)&sll, sizeof(sll));
+        if (sent < 0) {
+            snprintf(result->error_msg, sizeof(result->error_msg), "send failed");
+            continue;
+        }
+        result->tx_count++;
+
+        // Get TX timestamp from error queue
+        uint64_t tx_ts = 0;
+        struct pollfd pfd = {tx_fd, POLLERR, 0};
+        if (poll(&pfd, 1, 100) > 0) {
+            struct msghdr msg = {0};
+            struct iovec iov = {rx_buf, sizeof(rx_buf)};
+            msg.msg_iov = &iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = ctrl_buf;
+            msg.msg_controllen = sizeof(ctrl_buf);
+
+            recvmsg(tx_fd, &msg, MSG_ERRQUEUE);
+            extract_timestamp(&msg, &tx_ts);
+        }
+
+        // Wait for RX
+        struct pollfd rx_pfd = {rx_fd, POLLIN, 0};
+        int remaining = timeout_ms;
+        bool received = false;
+
+        while (remaining > 0 && !received) {
+            int ret = poll(&rx_pfd, 1, remaining < 100 ? remaining : 100);
+            if (ret > 0) {
+                struct msghdr msg = {0};
+                struct iovec iov = {rx_buf, sizeof(rx_buf)};
+                msg.msg_iov = &iov;
+                msg.msg_iovlen = 1;
+                msg.msg_control = ctrl_buf;
+                msg.msg_controllen = sizeof(ctrl_buf);
+
+                ssize_t len = recvmsg(rx_fd, &msg, 0);
+                if (len > 0) {
+                    // Check VLAN match (offset 14-15 after TPID)
+                    uint16_t rx_vlan = (rx_buf[14] << 8) | rx_buf[15];
+                    if ((rx_vlan & 0x0FFF) == vlan_id) {
+                        uint64_t rx_ts = 0;
+                        extract_timestamp(&msg, &rx_ts);
+
+                        if (rx_ts > 0 && tx_ts > 0 && rx_ts > tx_ts) {
+                            uint64_t latency = rx_ts - tx_ts;
+                            total_latency += latency;
+
+                            if (latency < result->min_latency_ns)
+                                result->min_latency_ns = latency;
+                            if (latency > result->max_latency_ns)
+                                result->max_latency_ns = latency;
+
+                            result->rx_count++;
+                            received = true;
+                        }
+                    }
+                }
+            }
+            remaining -= 100;
+        }
+    }
+
+    // Finalize
+    if (result->rx_count > 0) {
+        result->valid = true;
+        result->avg_latency_ns = total_latency / result->rx_count;
+        result->passed = (result->max_latency_ns <= max_latency_ns);
+        if (result->min_latency_ns == UINT64_MAX)
+            result->min_latency_ns = 0;
+    } else {
+        result->valid = false;
+        result->passed = false;
+        if (result->error_msg[0] == '\0')
+            snprintf(result->error_msg, sizeof(result->error_msg), "No packets received");
+    }
+
+    return result->passed ? 0 : 1;
+}
+
+// ============================================
+// MAIN TEST FUNCTION
+// ============================================
+
+int emb_latency_run(int packet_count, int timeout_ms, int max_latency_us) {
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║         EMBEDDED HW TIMESTAMP LATENCY TEST                       ║\n");
+    printf("║  Packets per VLAN: %-3d | Timeout: %dms | Max: %dus             ║\n",
+           packet_count, timeout_ms, max_latency_us);
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    // Reset state
+    memset(&g_emb_latency, 0, sizeof(g_emb_latency));
+
+    uint64_t max_latency_ns = (uint64_t)max_latency_us * 1000;
+    uint64_t start_time = get_time_ns();
+    int result_idx = 0;
+
+    // Test each port pair
+    for (size_t p = 0; p < NUM_PORT_PAIRS; p++) {
+        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+               PORT_PAIRS[p].tx_port, PORT_PAIRS[p].rx_port,
+               PORT_PAIRS[p].tx_iface, PORT_PAIRS[p].rx_iface);
+
+        // Create sockets
+        int tx_ifindex, rx_ifindex;
+        int tx_fd = create_raw_socket(PORT_PAIRS[p].tx_iface, &tx_ifindex);
+        int rx_fd = create_raw_socket(PORT_PAIRS[p].rx_iface, &rx_ifindex);
+
+        if (tx_fd < 0 || rx_fd < 0) {
+            printf("  ERROR: Cannot create sockets\n");
+            if (tx_fd >= 0) close(tx_fd);
+            if (rx_fd >= 0) close(rx_fd);
+            continue;
+        }
+
+        // Test each VLAN
+        for (int v = 0; v < PORT_PAIRS[p].vlan_count; v++) {
+            struct emb_latency_result *r = &g_emb_latency.results[result_idx];
+
+            run_single_test(tx_fd, rx_fd, tx_ifindex,
+                           PORT_PAIRS[p].tx_port, PORT_PAIRS[p].rx_port,
+                           PORT_PAIRS[p].vlans[v], PORT_PAIRS[p].vl_ids[v],
+                           packet_count, timeout_ms, max_latency_ns, r);
+
+            if (r->passed) {
+                g_emb_latency.passed_count++;
+            } else {
+                g_emb_latency.failed_count++;
+            }
+            result_idx++;
+
+            // Inter-VLAN delay
+            usleep(32);
+        }
+
+        close(tx_fd);
+        close(rx_fd);
+    }
+
+    // Finalize
+    g_emb_latency.result_count = result_idx;
+    g_emb_latency.test_completed = true;
+    g_emb_latency.test_passed = (g_emb_latency.failed_count == 0);
+    g_emb_latency.test_duration_ns = get_time_ns() - start_time;
+
+    // Calculate overall stats
+    uint64_t min = UINT64_MAX, max = 0, sum = 0;
+    int valid_count = 0;
+    for (int i = 0; i < result_idx; i++) {
+        struct emb_latency_result *r = &g_emb_latency.results[i];
+        if (r->valid && r->rx_count > 0) {
+            if (r->min_latency_ns < min) min = r->min_latency_ns;
+            if (r->max_latency_ns > max) max = r->max_latency_ns;
+            sum += r->avg_latency_ns;
+            valid_count++;
+        }
+    }
+    g_emb_latency.overall_min_ns = (min == UINT64_MAX) ? 0 : min;
+    g_emb_latency.overall_max_ns = max;
+    g_emb_latency.overall_avg_ns = valid_count > 0 ? sum / valid_count : 0;
+
+    // Print results
+    emb_latency_print();
+
+    return g_emb_latency.failed_count;
+}
+
+int emb_latency_run_default(void) {
+    return emb_latency_run(1, 100, 30);  // 1 packet, 100ms timeout, 30us max
+}
+
+// ============================================
+// ACCESSOR FUNCTIONS
+// ============================================
+
+bool emb_latency_completed(void) {
+    return g_emb_latency.test_completed;
+}
+
+bool emb_latency_all_passed(void) {
+    return g_emb_latency.test_completed && g_emb_latency.test_passed;
+}
+
+int emb_latency_get_count(void) {
+    return g_emb_latency.result_count;
+}
+
+const struct emb_latency_result* emb_latency_get(int index) {
+    if (index < 0 || (uint32_t)index >= g_emb_latency.result_count)
+        return NULL;
+    return &g_emb_latency.results[index];
+}
+
+const struct emb_latency_result* emb_latency_get_by_vlan(uint16_t vlan_id) {
+    for (uint32_t i = 0; i < g_emb_latency.result_count; i++) {
+        if (g_emb_latency.results[i].vlan_id == vlan_id)
+            return &g_emb_latency.results[i];
+    }
+    return NULL;
+}
+
+bool emb_latency_get_us(uint16_t vlan_id, double *min, double *avg, double *max) {
+    const struct emb_latency_result *r = emb_latency_get_by_vlan(vlan_id);
+    if (!r || !r->valid) return false;
+
+    *min = ns_to_us(r->min_latency_ns);
+    *avg = ns_to_us(r->avg_latency_ns);
+    *max = ns_to_us(r->max_latency_ns);
+    return true;
+}
+
+// ============================================
+// PRINT FUNCTIONS
+// ============================================
+
+void emb_latency_print(void) {
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                         EMBEDDED LATENCY TEST RESULTS                                    ║\n");
+    printf("╠══════════╦══════════╦══════════╦══════════╦═══════════╦═══════════╦═══════════╦══════════╣\n");
+    printf("║ TX Port  ║ RX Port  ║   VLAN   ║  VL-ID   ║  Min (us) ║  Avg (us) ║  Max (us) ║  Result  ║\n");
+    printf("╠══════════╬══════════╬══════════╬══════════╬═══════════╬═══════════╬═══════════╬══════════╣\n");
+
+    for (uint32_t i = 0; i < g_emb_latency.result_count; i++) {
+        struct emb_latency_result *r = &g_emb_latency.results[i];
+
+        if (r->valid && r->rx_count > 0) {
+            printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║  %7.2f  ║  %7.2f  ║  %7.2f  ║   %s   ║\n",
+                   r->tx_port, r->rx_port, r->vlan_id, r->vl_id,
+                   ns_to_us(r->min_latency_ns),
+                   ns_to_us(r->avg_latency_ns),
+                   ns_to_us(r->max_latency_ns),
+                   r->passed ? "PASS" : "FAIL");
+        } else {
+            printf("║    %2u    ║    %2u    ║   %4u   ║   %4u   ║     -     ║     -     ║     -     ║   FAIL   ║\n",
+                   r->tx_port, r->rx_port, r->vlan_id, r->vl_id);
+        }
+    }
+
+    printf("╠══════════╩══════════╩══════════╩══════════╩═══════════╩═══════════╩═══════════╩══════════╣\n");
+    emb_latency_print_summary();
+    printf("╚══════════════════════════════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+}
+
+void emb_latency_print_summary(void) {
+    printf("║  SUMMARY: %u/%u PASSED | Min: %.2f us | Avg: %.2f us | Max: %.2f us | Duration: %.1f ms  ║\n",
+           g_emb_latency.passed_count,
+           g_emb_latency.result_count,
+           ns_to_us(g_emb_latency.overall_min_ns),
+           ns_to_us(g_emb_latency.overall_avg_ns),
+           ns_to_us(g_emb_latency.overall_max_ns),
+           g_emb_latency.test_duration_ns / 1000000.0);
+}

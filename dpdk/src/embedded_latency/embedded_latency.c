@@ -66,10 +66,26 @@ static bool ask_question(const char *question) {
 }
 
 // ============================================
-// CONFIGURATION (same as latency_test)
+// CONFIGURATION
 // ============================================
 
-// Port pairs - TX -> RX mapping
+// Port info
+static const struct {
+    uint16_t port_id;
+    const char *iface;
+} PORT_INFO[] = {
+    {0, "ens2f0np0"},
+    {1, "ens2f1np1"},
+    {2, "ens1f0np0"},
+    {3, "ens1f1np1"},
+    {4, "ens3f0np0"},
+    {5, "ens3f1np1"},
+    {6, "ens5f0np0"},
+    {7, "ens5f1np1"},
+};
+#define NUM_PORTS (sizeof(PORT_INFO) / sizeof(PORT_INFO[0]))
+
+// LOOPBACK TEST: Port pairs - TX -> RX mapping (through Mellanox switch)
 static const struct {
     uint16_t tx_port;
     const char *tx_iface;
@@ -78,7 +94,7 @@ static const struct {
     uint16_t vlans[4];
     uint16_t vl_ids[4];
     int vlan_count;
-} PORT_PAIRS[] = {
+} LOOPBACK_PAIRS[] = {
     {0, "ens2f0np0", 7, "ens5f1np1", {105, 106, 107, 108}, {1027, 1155, 1283, 1411}, 4},
     {1, "ens2f1np1", 6, "ens5f0np0", {109, 110, 111, 112}, {1539, 1667, 1795, 1923}, 4},
     {2, "ens1f0np0", 5, "ens3f1np1", {97,  98,  99,  100}, {3,    131,  259,  387 }, 4},
@@ -88,7 +104,40 @@ static const struct {
     {6, "ens5f0np0", 1, "ens2f1np1", {121, 122, 123, 124}, {3075, 3203, 3331, 3459}, 4},
     {7, "ens5f1np1", 0, "ens2f0np0", {125, 126, 127, 128}, {3587, 3715, 3843, 3971}, 4},
 };
-#define NUM_PORT_PAIRS (sizeof(PORT_PAIRS) / sizeof(PORT_PAIRS[0]))
+#define NUM_LOOPBACK_PAIRS (sizeof(LOOPBACK_PAIRS) / sizeof(LOOPBACK_PAIRS[0]))
+
+// UNIT TEST: Port pairs - neighboring ports (0↔1, 2↔3, 4↔5, 6↔7)
+static const struct {
+    uint16_t tx_port;
+    const char *tx_iface;
+    uint16_t rx_port;
+    const char *rx_iface;
+    uint16_t vlans[4];
+    uint16_t vl_ids[4];
+    int vlan_count;
+} UNIT_TEST_PAIRS[] = {
+    // Port 0 -> Port 1
+    {0, "ens2f0np0", 1, "ens2f1np1", {105, 106, 107, 108}, {1027, 1155, 1283, 1411}, 4},
+    // Port 1 -> Port 0
+    {1, "ens2f1np1", 0, "ens2f0np0", {109, 110, 111, 112}, {1539, 1667, 1795, 1923}, 4},
+    // Port 2 -> Port 3
+    {2, "ens1f0np0", 3, "ens1f1np1", {97,  98,  99,  100}, {3,    131,  259,  387 }, 4},
+    // Port 3 -> Port 2
+    {3, "ens1f1np1", 2, "ens1f0np0", {101, 102, 103, 104}, {515,  643,  771,  899 }, 4},
+    // Port 4 -> Port 5
+    {4, "ens3f0np0", 5, "ens3f1np1", {113, 114, 115, 116}, {2051, 2179, 2307, 2435}, 4},
+    // Port 5 -> Port 4
+    {5, "ens3f1np1", 4, "ens3f0np0", {117, 118, 119, 120}, {2563, 2691, 2819, 2947}, 4},
+    // Port 6 -> Port 7
+    {6, "ens5f0np0", 7, "ens5f1np1", {121, 122, 123, 124}, {3075, 3203, 3331, 3459}, 4},
+    // Port 7 -> Port 6
+    {7, "ens5f1np1", 6, "ens5f0np0", {125, 126, 127, 128}, {3587, 3715, 3843, 3971}, 4},
+};
+#define NUM_UNIT_TEST_PAIRS (sizeof(UNIT_TEST_PAIRS) / sizeof(UNIT_TEST_PAIRS[0]))
+
+// Legacy alias for backward compatibility
+#define PORT_PAIRS LOOPBACK_PAIRS
+#define NUM_PORT_PAIRS NUM_LOOPBACK_PAIRS
 
 // Packet config
 #define PACKET_SIZE     1518
@@ -524,6 +573,292 @@ int emb_latency_run_interactive(void) {
 }
 
 // ============================================
+// LOOPBACK TEST (Mellanox Switch Latency)
+// ============================================
+
+int emb_latency_run_loopback(int packet_count, int timeout_ms, int max_latency_us) {
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║         LOOPBACK TEST (Mellanox Switch Latency)                  ║\n");
+    printf("║  Packets: %-3d | Timeout: %dms | Max: %dus                      ║\n",
+           packet_count, timeout_ms, max_latency_us);
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    uint64_t max_latency_ns = (uint64_t)max_latency_us * 1000;
+    uint64_t start_time = get_time_ns();
+    int result_idx = 0;
+    int failed_count = 0;
+    int passed_count = 0;
+
+    // Test each loopback port pair
+    for (size_t p = 0; p < NUM_LOOPBACK_PAIRS; p++) {
+        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+               LOOPBACK_PAIRS[p].tx_port, LOOPBACK_PAIRS[p].rx_port,
+               LOOPBACK_PAIRS[p].tx_iface, LOOPBACK_PAIRS[p].rx_iface);
+
+        int tx_ifindex, rx_ifindex;
+        int tx_fd = create_raw_socket(LOOPBACK_PAIRS[p].tx_iface, &tx_ifindex);
+        int rx_fd = create_raw_socket(LOOPBACK_PAIRS[p].rx_iface, &rx_ifindex);
+
+        if (tx_fd < 0 || rx_fd < 0) {
+            printf("  ERROR: Cannot create sockets\n");
+            if (tx_fd >= 0) close(tx_fd);
+            if (rx_fd >= 0) close(rx_fd);
+            continue;
+        }
+
+        for (int v = 0; v < LOOPBACK_PAIRS[p].vlan_count; v++) {
+            struct emb_latency_result *r = &g_emb_latency.loopback_results[result_idx];
+
+            run_single_test(tx_fd, rx_fd, tx_ifindex,
+                           LOOPBACK_PAIRS[p].tx_port, LOOPBACK_PAIRS[p].rx_port,
+                           LOOPBACK_PAIRS[p].vlans[v], LOOPBACK_PAIRS[p].vl_ids[v],
+                           packet_count, timeout_ms, max_latency_ns, r);
+
+            if (r->passed) {
+                passed_count++;
+            } else {
+                failed_count++;
+            }
+            result_idx++;
+            usleep(32);
+        }
+
+        close(tx_fd);
+        close(rx_fd);
+    }
+
+    // Update loopback state
+    g_emb_latency.loopback_result_count = result_idx;
+    g_emb_latency.loopback_completed = true;
+    g_emb_latency.loopback_passed = (failed_count == 0);
+    g_emb_latency.loopback_skipped = false;
+
+    printf("\nLoopback test complete: %d/%d passed\n\n", passed_count, result_idx);
+
+    return failed_count;
+}
+
+// ============================================
+// UNIT TEST (Device Latency)
+// ============================================
+
+int emb_latency_run_unit_test(int packet_count, int timeout_ms, int max_latency_us) {
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║         UNIT TEST (Device Latency)                               ║\n");
+    printf("║  Port pairs: 0↔1, 2↔3, 4↔5, 6↔7                                  ║\n");
+    printf("║  Packets: %-3d | Timeout: %dms | Max: %dus                      ║\n",
+           packet_count, timeout_ms, max_latency_us);
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    uint64_t max_latency_ns = (uint64_t)max_latency_us * 1000;
+    uint64_t start_time = get_time_ns();
+    int result_idx = 0;
+    int failed_count = 0;
+    int passed_count = 0;
+
+    // Test each unit test port pair
+    for (size_t p = 0; p < NUM_UNIT_TEST_PAIRS; p++) {
+        printf("Testing Port %d -> Port %d (%s -> %s)...\n",
+               UNIT_TEST_PAIRS[p].tx_port, UNIT_TEST_PAIRS[p].rx_port,
+               UNIT_TEST_PAIRS[p].tx_iface, UNIT_TEST_PAIRS[p].rx_iface);
+
+        int tx_ifindex, rx_ifindex;
+        int tx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].tx_iface, &tx_ifindex);
+        int rx_fd = create_raw_socket(UNIT_TEST_PAIRS[p].rx_iface, &rx_ifindex);
+
+        if (tx_fd < 0 || rx_fd < 0) {
+            printf("  ERROR: Cannot create sockets\n");
+            if (tx_fd >= 0) close(tx_fd);
+            if (rx_fd >= 0) close(rx_fd);
+            continue;
+        }
+
+        for (int v = 0; v < UNIT_TEST_PAIRS[p].vlan_count; v++) {
+            struct emb_latency_result *r = &g_emb_latency.unit_results[result_idx];
+
+            run_single_test(tx_fd, rx_fd, tx_ifindex,
+                           UNIT_TEST_PAIRS[p].tx_port, UNIT_TEST_PAIRS[p].rx_port,
+                           UNIT_TEST_PAIRS[p].vlans[v], UNIT_TEST_PAIRS[p].vl_ids[v],
+                           packet_count, timeout_ms, max_latency_ns, r);
+
+            if (r->passed) {
+                passed_count++;
+            } else {
+                failed_count++;
+            }
+            result_idx++;
+            usleep(32);
+        }
+
+        close(tx_fd);
+        close(rx_fd);
+    }
+
+    // Update unit test state
+    g_emb_latency.unit_result_count = result_idx;
+    g_emb_latency.unit_completed = true;
+    g_emb_latency.unit_passed = (failed_count == 0);
+
+    printf("\nUnit test complete: %d/%d passed\n\n", passed_count, result_idx);
+
+    return failed_count;
+}
+
+// ============================================
+// COMBINED LATENCY CALCULATION
+// ============================================
+
+void emb_latency_calculate_combined(void) {
+    // Port pairs for combined results: (0,1), (2,3), (4,5), (6,7)
+    const uint16_t port_pairs[][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}};
+    g_emb_latency.combined_count = 4;
+
+    for (int i = 0; i < 4; i++) {
+        struct emb_combined_latency *c = &g_emb_latency.combined[i];
+        memset(c, 0, sizeof(*c));
+
+        c->port_a = port_pairs[i][0];
+        c->port_b = port_pairs[i][1];
+
+        // Get switch latency (from loopback or default)
+        if (g_emb_latency.loopback_completed && !g_emb_latency.loopback_skipped) {
+            // Find loopback result for this port pair
+            // We need average of port_a->X and port_b->X loopback results
+            double sum = 0;
+            int count = 0;
+
+            for (uint32_t j = 0; j < g_emb_latency.loopback_result_count; j++) {
+                struct emb_latency_result *r = &g_emb_latency.loopback_results[j];
+                if (r->valid && (r->tx_port == c->port_a || r->tx_port == c->port_b)) {
+                    sum += ns_to_us(r->avg_latency_ns);
+                    count++;
+                }
+            }
+
+            if (count > 0) {
+                c->switch_latency_us = sum / count;
+                c->switch_measured = true;
+            } else {
+                c->switch_latency_us = EMB_LAT_DEFAULT_SWITCH_US;
+                c->switch_measured = false;
+            }
+        } else {
+            // Use default
+            c->switch_latency_us = EMB_LAT_DEFAULT_SWITCH_US;
+            c->switch_measured = false;
+        }
+
+        // Get total latency (from unit test)
+        if (g_emb_latency.unit_completed) {
+            // Find unit test results for port_a -> port_b and port_b -> port_a
+            double sum = 0;
+            int count = 0;
+
+            for (uint32_t j = 0; j < g_emb_latency.unit_result_count; j++) {
+                struct emb_latency_result *r = &g_emb_latency.unit_results[j];
+                if (r->valid &&
+                    ((r->tx_port == c->port_a && r->rx_port == c->port_b) ||
+                     (r->tx_port == c->port_b && r->rx_port == c->port_a))) {
+                    sum += ns_to_us(r->avg_latency_ns);
+                    count++;
+                }
+            }
+
+            if (count > 0) {
+                c->total_latency_us = sum / count;
+                c->total_measured = true;
+            }
+        }
+
+        // Calculate unit (device) latency
+        if (c->total_measured) {
+            c->unit_latency_us = c->total_latency_us - c->switch_latency_us;
+            if (c->unit_latency_us < 0) c->unit_latency_us = 0;
+            c->unit_valid = true;
+            c->passed = true;  // Adjust threshold as needed
+        }
+    }
+}
+
+// ============================================
+// FULL INTERACTIVE SEQUENCE
+// ============================================
+
+int emb_latency_full_sequence(void) {
+    int total_fails = 0;
+
+    printf("\n");
+    printf("╔══════════════════════════════════════════════════════════════════╗\n");
+    printf("║         LATENCY TEST SEQUENCE                                    ║\n");
+    printf("║  1. Loopback Test (Mellanox switch latency)                      ║\n");
+    printf("║  2. Unit Test (Device latency)                                   ║\n");
+    printf("║  3. Combined Results (unit = total - switch)                     ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    // Reset state
+    memset(&g_emb_latency, 0, sizeof(g_emb_latency));
+
+    // ==========================================
+    // STEP 1: Loopback Test (Mellanox Switch)
+    // ==========================================
+    printf("=== STEP 1: Loopback Test (Mellanox Switch Latency) ===\n\n");
+
+    if (ask_question("Do you want to run the Loopback test to measure Mellanox switch latency?")) {
+        // Ask about loopback connectors
+        while (1) {
+            if (ask_question("You need to install the LoopBack connectors.\n"
+                            "Are the connectors installed? Should I start the test?")) {
+                // Run loopback test
+                int fails = emb_latency_run_loopback(1, 100, 30);
+                total_fails += fails;
+                break;
+            } else {
+                if (ask_question("Do you want to skip the Loopback test and use default (14µs)?")) {
+                    printf("Using default Mellanox switch latency: %.1f µs\n\n",
+                           EMB_LAT_DEFAULT_SWITCH_US);
+                    g_emb_latency.loopback_skipped = true;
+                    break;
+                }
+                printf("\nPlease install the LoopBack connectors and try again.\n\n");
+            }
+        }
+    } else {
+        printf("Using default Mellanox switch latency: %.1f µs\n\n",
+               EMB_LAT_DEFAULT_SWITCH_US);
+        g_emb_latency.loopback_skipped = true;
+    }
+
+    // ==========================================
+    // STEP 2: Unit Test (Device)
+    // ==========================================
+    printf("=== STEP 2: Unit Test (Device Latency) ===\n\n");
+    printf("This test measures total latency through the device.\n");
+    printf("Port pairs: 0↔1, 2↔3, 4↔5, 6↔7\n\n");
+
+    int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // Higher threshold for unit test
+    total_fails += unit_fails;
+
+    // ==========================================
+    // STEP 3: Calculate Combined Results
+    // ==========================================
+    printf("=== STEP 3: Combined Latency Results ===\n\n");
+
+    emb_latency_calculate_combined();
+    emb_latency_print_combined();
+
+    // Update legacy state
+    g_emb_latency.test_completed = true;
+    g_emb_latency.test_passed = (total_fails == 0);
+
+    return total_fails;
+}
+
+// ============================================
 // ACCESSOR FUNCTIONS
 // ============================================
 
@@ -605,4 +940,61 @@ void emb_latency_print_summary(void) {
            ns_to_us(g_emb_latency.overall_avg_ns),
            ns_to_us(g_emb_latency.overall_max_ns),
            g_emb_latency.test_duration_ns / 1000000.0);
+}
+
+void emb_latency_print_combined(void) {
+    printf("\n");
+    printf("╔═══════════════════════════════════════════════════════════════════════════════════════════════╗\n");
+    printf("║                            COMBINED LATENCY RESULTS                                           ║\n");
+    printf("╠═══════════╦═══════════╦══════════════════╦══════════════════╦══════════════════╦═════════════╣\n");
+    printf("║ Port Pair ║  Source   ║  Switch (µs)     ║  Total (µs)      ║  Unit (µs)       ║   Status    ║\n");
+    printf("╠═══════════╬═══════════╬══════════════════╬══════════════════╬══════════════════╬═════════════╣\n");
+
+    for (uint32_t i = 0; i < g_emb_latency.combined_count; i++) {
+        struct emb_combined_latency *c = &g_emb_latency.combined[i];
+
+        printf("║   %u ↔ %u   ║ %-9s ║     %8.2f     ║     %8.2f     ║     %8.2f     ║    %s    ║\n",
+               c->port_a, c->port_b,
+               c->switch_measured ? "measured" : "default",
+               c->switch_latency_us,
+               c->total_measured ? c->total_latency_us : 0.0,
+               c->unit_valid ? c->unit_latency_us : 0.0,
+               c->unit_valid ? "OK" : "N/A");
+    }
+
+    printf("╚═══════════╩═══════════╩══════════════════╩══════════════════╩══════════════════╩═════════════╝\n");
+    printf("\n");
+    printf("Formula: Unit Latency = Total Latency - Switch Latency\n");
+    printf("Switch latency source: %s\n\n",
+           g_emb_latency.loopback_skipped ? "Default (14 µs)" : "Measured (Loopback test)");
+}
+
+// ============================================
+// COMBINED LATENCY ACCESSORS
+// ============================================
+
+const struct emb_combined_latency* emb_latency_get_combined(uint16_t port_a) {
+    for (uint32_t i = 0; i < g_emb_latency.combined_count; i++) {
+        if (g_emb_latency.combined[i].port_a == port_a)
+            return &g_emb_latency.combined[i];
+    }
+    return NULL;
+}
+
+bool emb_latency_get_unit_us(uint16_t port_a, double *unit_latency_us) {
+    const struct emb_combined_latency *c = emb_latency_get_combined(port_a);
+    if (!c || !c->unit_valid) return false;
+
+    *unit_latency_us = c->unit_latency_us;
+    return true;
+}
+
+bool emb_latency_get_all_us(uint16_t port_a, double *switch_us, double *total_us, double *unit_us) {
+    const struct emb_combined_latency *c = emb_latency_get_combined(port_a);
+    if (!c || !c->unit_valid) return false;
+
+    *switch_us = c->switch_latency_us;
+    *total_us = c->total_latency_us;
+    *unit_us = c->unit_latency_us;
+    return true;
 }

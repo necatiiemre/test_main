@@ -23,9 +23,18 @@ extern "C" {
 // ============================================
 #define EMB_LAT_MAX_RESULTS     64      // Maximum VLAN results
 #define EMB_LAT_MAX_PORT_PAIRS  8       // Maximum port pairs
+#define EMB_LAT_DEFAULT_SWITCH_US 14.0  // Default Mellanox switch latency (microseconds)
 
 // ============================================
-// RESULT STRUCTURE
+// TEST TYPES
+// ============================================
+typedef enum {
+    EMB_TEST_LOOPBACK,      // Loopback test (Mellanox switch latency)
+    EMB_TEST_UNIT           // Unit test (total latency through device)
+} emb_test_type_t;
+
+// ============================================
+// RESULT STRUCTURE (per VLAN)
 // ============================================
 struct emb_latency_result {
     uint16_t tx_port;           // TX port ID
@@ -46,12 +55,52 @@ struct emb_latency_result {
 };
 
 // ============================================
+// COMBINED LATENCY RESULT (per port pair)
+// ============================================
+struct emb_combined_latency {
+    uint16_t port_a;                    // Port A (e.g., 0)
+    uint16_t port_b;                    // Port B (e.g., 1)
+
+    // Switch latency (from loopback test or default)
+    double   switch_latency_us;         // Mellanox switch latency (µs)
+    bool     switch_measured;           // true = measured, false = default 14µs
+
+    // Total latency (from unit test)
+    double   total_latency_us;          // Total latency A→B→A (µs)
+    bool     total_measured;            // true = measured
+
+    // Unit (device) latency = total - switch
+    double   unit_latency_us;           // Device latency (µs)
+    bool     unit_valid;                // Calculation valid?
+
+    bool     passed;                    // Within threshold?
+};
+
+// ============================================
 // GLOBAL STATE
 // ============================================
 struct emb_latency_state {
-    bool     test_completed;            // Test ran?
+    // Loopback test state
+    bool     loopback_completed;        // Loopback test ran?
+    bool     loopback_passed;           // All loopback tests passed?
+    bool     loopback_skipped;          // User skipped loopback test?
+    uint32_t loopback_result_count;     // Number of loopback results
+    struct emb_latency_result loopback_results[EMB_LAT_MAX_RESULTS];
+
+    // Unit test state
+    bool     unit_completed;            // Unit test ran?
+    bool     unit_passed;               // All unit tests passed?
+    uint32_t unit_result_count;         // Number of unit test results
+    struct emb_latency_result unit_results[EMB_LAT_MAX_RESULTS];
+
+    // Combined results (per port pair: 0-1, 2-3, 4-5, 6-7)
+    uint32_t combined_count;            // Number of combined results (4)
+    struct emb_combined_latency combined[EMB_LAT_MAX_PORT_PAIRS / 2];
+
+    // Legacy fields for backward compatibility
+    bool     test_completed;            // Any test ran?
     bool     test_passed;               // All tests passed?
-    uint32_t result_count;              // Number of results
+    uint32_t result_count;              // Total results
     uint32_t passed_count;              // Passed tests
     uint32_t failed_count;              // Failed tests
 
@@ -98,6 +147,44 @@ int emb_latency_run_default(void);
 int emb_latency_run_interactive(void);
 
 /**
+ * Run loopback test (measures Mellanox switch latency)
+ * Port pairs: 0→7, 1→6, 2→5, 3→4, etc.
+ *
+ * @param packet_count  Packets per VLAN
+ * @param timeout_ms    RX timeout
+ * @param max_latency_us Maximum acceptable latency
+ * @return 0 = all passed, >0 = fail count
+ */
+int emb_latency_run_loopback(int packet_count, int timeout_ms, int max_latency_us);
+
+/**
+ * Run unit test (measures total latency through device)
+ * Port pairs: 0↔1, 2↔3, 4↔5, 6↔7
+ *
+ * @param packet_count  Packets per VLAN
+ * @param timeout_ms    RX timeout
+ * @param max_latency_us Maximum acceptable latency
+ * @return 0 = all passed, >0 = fail count
+ */
+int emb_latency_run_unit_test(int packet_count, int timeout_ms, int max_latency_us);
+
+/**
+ * Calculate combined latency (unit_latency = total - switch)
+ * Must be called after both loopback and unit tests complete
+ */
+void emb_latency_calculate_combined(void);
+
+/**
+ * Full interactive test sequence:
+ * 1. Ask for loopback test (or use default 14µs)
+ * 2. Run unit test
+ * 3. Calculate combined results
+ *
+ * @return 0 = success, >0 = fail count
+ */
+int emb_latency_full_sequence(void);
+
+/**
  * Check if test completed
  */
 bool emb_latency_completed(void);
@@ -136,6 +223,40 @@ void emb_latency_print(void);
  * Print summary only
  */
 void emb_latency_print_summary(void);
+
+/**
+ * Print combined latency results
+ */
+void emb_latency_print_combined(void);
+
+// ============================================
+// COMBINED LATENCY ACCESSORS
+// ============================================
+
+/**
+ * Get combined latency for a port pair
+ * @param port_a First port (0, 2, 4, or 6)
+ * @return Pointer to combined latency struct, or NULL
+ */
+const struct emb_combined_latency* emb_latency_get_combined(uint16_t port_a);
+
+/**
+ * Get unit (device) latency for a port pair in microseconds
+ * @param port_a First port (0, 2, 4, or 6)
+ * @param unit_latency_us Output: device latency in µs
+ * @return true if valid, false otherwise
+ */
+bool emb_latency_get_unit_us(uint16_t port_a, double *unit_latency_us);
+
+/**
+ * Get all latency components for a port pair
+ * @param port_a First port (0, 2, 4, or 6)
+ * @param switch_us Output: switch latency (µs)
+ * @param total_us Output: total latency (µs)
+ * @param unit_us Output: device latency (µs)
+ * @return true if valid, false otherwise
+ */
+bool emb_latency_get_all_us(uint16_t port_a, double *switch_us, double *total_us, double *unit_us);
 
 #ifdef __cplusplus
 }

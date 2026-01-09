@@ -59,28 +59,30 @@ int main(int argc, char const *argv[])
 
     // =========================================================================
     // EMBEDDED HW TIMESTAMP LATENCY TEST (runs BEFORE DPDK takes over NICs!)
+    // Full sequence: Loopback (switch) + Unit Test (device) + Combined Results
     // =========================================================================
 #if EMBEDDED_HW_LATENCY_TEST
-    // Interactive mode: Ask user if they want to run the test
-    int latency_fails = emb_latency_run_interactive();
+    // Full interactive sequence:
+    // 1. Loopback test (Mellanox switch latency) - or use default 14µs
+    // 2. Unit test (device latency) - port pairs 0↔1, 2↔3, 4↔5, 6↔7
+    // 3. Combined results: unit_latency = total - switch
+    int latency_fails = emb_latency_full_sequence();
 
     if (emb_latency_completed()) {
-        // Test was actually run (not skipped)
         if (latency_fails > 0) {
-            printf("\n*** WARNING: %d VLAN(s) failed latency test! ***\n\n", latency_fails);
-        } else if (latency_fails == 0) {
-            printf("\n*** All latency tests PASSED! ***\n\n");
+            printf("\n*** WARNING: %d test(s) failed! ***\n\n", latency_fails);
         } else {
-            printf("\n*** Latency test error: %d ***\n\n", latency_fails);
+            printf("\n*** All latency tests PASSED! ***\n\n");
         }
 
-        // Sonuçlara erişim örneği:
-        // const struct emb_latency_result *r = emb_latency_get_by_vlan(105);
-        // if (r && r->valid) {
-        //     printf("VLAN 105: %.2f us\n", r->avg_latency_ns / 1000.0);
+        // Örnek: Port pair 0-1 için tüm gecikme değerlerini al
+        // double switch_us, total_us, unit_us;
+        // if (emb_latency_get_all_us(0, &switch_us, &total_us, &unit_us)) {
+        //     printf("Port 0-1: Switch=%.2f µs, Total=%.2f µs, Unit=%.2f µs\n",
+        //            switch_us, total_us, unit_us);
         // }
 
-        printf("=== Latency test complete, initializing DPDK ===\n\n");
+        printf("=== Latency test sequence complete, initializing DPDK ===\n\n");
     } else {
         printf("=== Latency test skipped, initializing DPDK ===\n\n");
     }

@@ -823,32 +823,46 @@ bool SSHDeployer::deployAndBuild(const std::string& local_source_dir,
 bool SSHDeployer::stopApplication(const std::string& app_name, bool use_sudo) {
     std::cout << getLogPrefix() << " Stopping application: " << app_name << std::endl;
 
-    // Find and kill process by name
-    std::string kill_cmd = "pkill -f '" + app_name + "'";
+    // First, authenticate sudo separately to avoid pipe issues
     if (use_sudo) {
-        kill_cmd = "echo '" + m_password + "' | sudo -S pkill -f '" + app_name + "'";
+        std::string auth_cmd = "echo '" + m_password + "' | sudo -S -v";
+        std::string ssh_auth = buildSSHCommand(auth_cmd);
+        g_systemCommand.execute(ssh_auth);
     }
+
+    // Kill with SIGTERM first (graceful)
+    std::string kill_cmd = use_sudo
+        ? "sudo pkill -TERM -f '" + app_name + "'"
+        : "pkill -TERM -f '" + app_name + "'";
 
     std::string ssh_cmd = buildSSHCommand(kill_cmd);
     auto result = g_systemCommand.execute(ssh_cmd);
 
-    // pkill returns 0 if process found and killed, 1 if no process found
-    // Both are acceptable outcomes
-    if (result.success || result.output.find("no process") != std::string::npos) {
-        std::cout << getLogPrefix() << " Application stopped (or was not running)" << std::endl;
-        return true;
+    // Wait a moment for graceful shutdown
+    usleep(500000);  // 500ms
+
+    // Check if still running
+    if (isApplicationRunning(app_name)) {
+        std::cout << getLogPrefix() << " Process still running, sending SIGKILL..." << std::endl;
+
+        // Force kill with SIGKILL
+        std::string kill9_cmd = use_sudo
+            ? "sudo pkill -9 -f '" + app_name + "'"
+            : "pkill -9 -f '" + app_name + "'";
+
+        ssh_cmd = buildSSHCommand(kill9_cmd);
+        g_systemCommand.execute(ssh_cmd);
+
+        // Wait and verify
+        usleep(500000);  // 500ms
+
+        if (isApplicationRunning(app_name)) {
+            std::cerr << getLogPrefix() << " WARNING: Failed to stop " << app_name << std::endl;
+            return false;
+        }
     }
 
-    // Double check with SIGKILL
-    std::string kill9_cmd = "pkill -9 -f '" + app_name + "'";
-    if (use_sudo) {
-        kill9_cmd = "echo '" + m_password + "' | sudo -S pkill -9 -f '" + app_name + "'";
-    }
-
-    ssh_cmd = buildSSHCommand(kill9_cmd);
-    g_systemCommand.execute(ssh_cmd);
-
-    std::cout << getLogPrefix() << " Force kill sent" << std::endl;
+    std::cout << getLogPrefix() << " Application stopped successfully" << std::endl;
     return true;
 }
 

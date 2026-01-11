@@ -900,10 +900,26 @@ int emb_latency_full_sequence(void) {
     // Use default switch latency (loopback test is optional and rarely used)
     g_emb_latency.loopback_skipped = true;
 
+    // Ask user if they want to run the latency test
+    if (!ask_question("Do you want to run HW Timestamp Latency Test?")) {
+        printf("Latency test skipped by user.\n\n");
+        g_emb_latency.test_completed = true;
+        g_emb_latency.test_passed = true;
+        return 0;  // Skipped = success
+    }
+
+    // Confirm before starting
+    if (!ask_question("Ready to start latency test on neighboring ports (0↔1, 2↔3, 4↔5, 6↔7)?")) {
+        printf("Latency test skipped by user.\n\n");
+        g_emb_latency.test_completed = true;
+        g_emb_latency.test_passed = true;
+        return 0;  // Skipped = success
+    }
+
     // ==========================================
     // STEP 1: Unit Test (Device Latency)
     // ==========================================
-    printf("=== Unit Test (Device Latency) ===\n\n");
+    printf("\n=== Unit Test (Device Latency) ===\n\n");
     printf("Testing latency through device on neighboring ports.\n");
     printf("Port pairs: 0→1, 1→0, 2→3, 3→2, 4→5, 5→4, 6→7, 7→6\n\n");
 

@@ -55,18 +55,18 @@ struct emb_latency_result {
 };
 
 // ============================================
-// COMBINED LATENCY RESULT (per port pair)
+// COMBINED LATENCY RESULT (per direction)
 // ============================================
 struct emb_combined_latency {
-    uint16_t port_a;                    // Port A (e.g., 0)
-    uint16_t port_b;                    // Port B (e.g., 1)
+    uint16_t tx_port;                   // TX Port (e.g., 0)
+    uint16_t rx_port;                   // RX Port (e.g., 1)
 
     // Switch latency (from loopback test or default)
     double   switch_latency_us;         // Mellanox switch latency (µs)
     bool     switch_measured;           // true = measured, false = default 14µs
 
     // Total latency (from unit test)
-    double   total_latency_us;          // Total latency A→B→A (µs)
+    double   total_latency_us;          // Total latency TX→RX (µs)
     bool     total_measured;            // true = measured
 
     // Unit (device) latency = total - switch
@@ -74,6 +74,10 @@ struct emb_combined_latency {
     bool     unit_valid;                // Calculation valid?
 
     bool     passed;                    // Within threshold?
+
+    // Legacy aliases for backward compatibility
+    #define port_a tx_port
+    #define port_b rx_port
 };
 
 // ============================================
@@ -93,9 +97,9 @@ struct emb_latency_state {
     uint32_t unit_result_count;         // Number of unit test results
     struct emb_latency_result unit_results[EMB_LAT_MAX_RESULTS];
 
-    // Combined results (per port pair: 0-1, 2-3, 4-5, 6-7)
-    uint32_t combined_count;            // Number of combined results (4)
-    struct emb_combined_latency combined[EMB_LAT_MAX_PORT_PAIRS / 2];
+    // Combined results (per direction: 0→1, 1→0, 2→3, 3→2, 4→5, 5→4, 6→7, 7→6)
+    uint32_t combined_count;            // Number of combined results (8)
+    struct emb_combined_latency combined[EMB_LAT_MAX_PORT_PAIRS];
 
     // Legacy fields for backward compatibility
     bool     test_completed;            // Any test ran?
@@ -244,29 +248,37 @@ void emb_latency_print_combined(void);
 // ============================================
 
 /**
- * Get combined latency for a port pair
- * @param port_a First port (0, 2, 4, or 6)
- * @return Pointer to combined latency struct, or NULL
+ * Get combined latency for a direction (tx_port → rx_port)
+ * @param tx_port TX port (0-7)
+ * @return Pointer to first matching combined latency struct, or NULL
  */
-const struct emb_combined_latency* emb_latency_get_combined(uint16_t port_a);
+const struct emb_combined_latency* emb_latency_get_combined(uint16_t tx_port);
 
 /**
- * Get unit (device) latency for a port pair in microseconds
- * @param port_a First port (0, 2, 4, or 6)
+ * Get combined latency for a specific direction
+ * @param tx_port TX port (0-7)
+ * @param rx_port RX port (0-7)
+ * @return Pointer to combined latency struct, or NULL
+ */
+const struct emb_combined_latency* emb_latency_get_combined_direction(uint16_t tx_port, uint16_t rx_port);
+
+/**
+ * Get unit (device) latency for a direction in microseconds
+ * @param tx_port TX port (0-7)
  * @param unit_latency_us Output: device latency in µs
  * @return true if valid, false otherwise
  */
-bool emb_latency_get_unit_us(uint16_t port_a, double *unit_latency_us);
+bool emb_latency_get_unit_us(uint16_t tx_port, double *unit_latency_us);
 
 /**
- * Get all latency components for a port pair
- * @param port_a First port (0, 2, 4, or 6)
+ * Get all latency components for a direction
+ * @param tx_port TX port (0-7)
  * @param switch_us Output: switch latency (µs)
  * @param total_us Output: total latency (µs)
  * @param unit_us Output: device latency (µs)
  * @return true if valid, false otherwise
  */
-bool emb_latency_get_all_us(uint16_t port_a, double *switch_us, double *total_us, double *unit_us);
+bool emb_latency_get_all_us(uint16_t tx_port, double *switch_us, double *total_us, double *unit_us);
 
 #ifdef __cplusplus
 }

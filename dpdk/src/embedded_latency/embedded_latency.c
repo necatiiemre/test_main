@@ -807,27 +807,32 @@ int emb_latency_run_unit_test(int packet_count, int timeout_ms, int max_latency_
 // ============================================
 
 void emb_latency_calculate_combined(void) {
-    // Port pairs for combined results: (0,1), (2,3), (4,5), (6,7)
-    const uint16_t port_pairs[][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}};
-    g_emb_latency.combined_count = 4;
+    // Each direction separately: 0→1, 1→0, 2→3, 3→2, 4→5, 5→4, 6→7, 7→6
+    const uint16_t directions[][2] = {
+        {0, 1}, {1, 0},  // Port pair 0-1
+        {2, 3}, {3, 2},  // Port pair 2-3
+        {4, 5}, {5, 4},  // Port pair 4-5
+        {6, 7}, {7, 6}   // Port pair 6-7
+    };
+    g_emb_latency.combined_count = 8;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         struct emb_combined_latency *c = &g_emb_latency.combined[i];
         memset(c, 0, sizeof(*c));
 
-        c->port_a = port_pairs[i][0];
-        c->port_b = port_pairs[i][1];
+        c->tx_port = directions[i][0];
+        c->rx_port = directions[i][1];
 
         // Get switch latency (from loopback or default)
+        // For each direction, use the TX port's loopback measurement
         if (g_emb_latency.loopback_completed && !g_emb_latency.loopback_skipped) {
-            // Find loopback result for this port pair
-            // We need average of port_a->X and port_b->X loopback results
+            // Find loopback result for this TX port
             double sum = 0;
             int count = 0;
 
             for (uint32_t j = 0; j < g_emb_latency.loopback_result_count; j++) {
                 struct emb_latency_result *r = &g_emb_latency.loopback_results[j];
-                if (r->valid && (r->tx_port == c->port_a || r->tx_port == c->port_b)) {
+                if (r->valid && r->tx_port == c->tx_port) {
                     sum += ns_to_us(r->avg_latency_ns);
                     count++;
                 }
@@ -846,17 +851,16 @@ void emb_latency_calculate_combined(void) {
             c->switch_measured = false;
         }
 
-        // Get total latency (from unit test)
+        // Get total latency (from unit test) for this specific direction
         if (g_emb_latency.unit_completed) {
-            // Find unit test results for port_a -> port_b and port_b -> port_a
+            // Find unit test results for tx_port -> rx_port
             double sum = 0;
             int count = 0;
 
             for (uint32_t j = 0; j < g_emb_latency.unit_result_count; j++) {
                 struct emb_latency_result *r = &g_emb_latency.unit_results[j];
                 if (r->valid &&
-                    ((r->tx_port == c->port_a && r->rx_port == c->port_b) ||
-                     (r->tx_port == c->port_b && r->rx_port == c->port_a))) {
+                    r->tx_port == c->tx_port && r->rx_port == c->rx_port) {
                     sum += ns_to_us(r->avg_latency_ns);
                     count++;
                 }
@@ -1173,16 +1177,16 @@ void emb_latency_print_summary(void) {
 void emb_latency_print_combined(void) {
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════════════════════════════════╗\n");
-    printf("║                            COMBINED LATENCY RESULTS                                           ║\n");
+    printf("║                       COMBINED LATENCY RESULTS (Per Direction)                                ║\n");
     printf("╠═══════════╦═══════════╦══════════════════╦══════════════════╦══════════════════╦═════════════╣\n");
-    printf("║ Port Pair ║  Source   ║  Switch (µs)     ║  Total (µs)      ║  Unit (µs)       ║   Status    ║\n");
+    printf("║ Direction ║  Source   ║  Switch (µs)     ║  Total (µs)      ║  Unit (µs)       ║   Status    ║\n");
     printf("╠═══════════╬═══════════╬══════════════════╬══════════════════╬══════════════════╬═════════════╣\n");
 
     for (uint32_t i = 0; i < g_emb_latency.combined_count; i++) {
         struct emb_combined_latency *c = &g_emb_latency.combined[i];
 
-        printf("║   %u ↔ %u   ║ %-9s ║     %8.2f     ║     %8.2f     ║     %8.2f     ║    %s    ║\n",
-               c->port_a, c->port_b,
+        printf("║   %u → %u   ║ %-9s ║     %8.2f     ║     %8.2f     ║     %8.2f     ║    %s    ║\n",
+               c->tx_port, c->rx_port,
                c->switch_measured ? "measured" : "default",
                c->switch_latency_us,
                c->total_measured ? c->total_latency_us : 0.0,
@@ -1201,24 +1205,36 @@ void emb_latency_print_combined(void) {
 // COMBINED LATENCY ACCESSORS
 // ============================================
 
-const struct emb_combined_latency* emb_latency_get_combined(uint16_t port_a) {
+const struct emb_combined_latency* emb_latency_get_combined(uint16_t tx_port) {
     for (uint32_t i = 0; i < g_emb_latency.combined_count; i++) {
-        if (g_emb_latency.combined[i].port_a == port_a)
+        if (g_emb_latency.combined[i].tx_port == tx_port)
             return &g_emb_latency.combined[i];
     }
     return NULL;
 }
 
-bool emb_latency_get_unit_us(uint16_t port_a, double *unit_latency_us) {
-    const struct emb_combined_latency *c = emb_latency_get_combined(port_a);
+/**
+ * Get combined latency for a specific direction (tx_port → rx_port)
+ */
+const struct emb_combined_latency* emb_latency_get_combined_direction(uint16_t tx_port, uint16_t rx_port) {
+    for (uint32_t i = 0; i < g_emb_latency.combined_count; i++) {
+        if (g_emb_latency.combined[i].tx_port == tx_port &&
+            g_emb_latency.combined[i].rx_port == rx_port)
+            return &g_emb_latency.combined[i];
+    }
+    return NULL;
+}
+
+bool emb_latency_get_unit_us(uint16_t tx_port, double *unit_latency_us) {
+    const struct emb_combined_latency *c = emb_latency_get_combined(tx_port);
     if (!c || !c->unit_valid) return false;
 
     *unit_latency_us = c->unit_latency_us;
     return true;
 }
 
-bool emb_latency_get_all_us(uint16_t port_a, double *switch_us, double *total_us, double *unit_us) {
-    const struct emb_combined_latency *c = emb_latency_get_combined(port_a);
+bool emb_latency_get_all_us(uint16_t tx_port, double *switch_us, double *total_us, double *unit_us) {
+    const struct emb_combined_latency *c = emb_latency_get_combined(tx_port);
     if (!c || !c->unit_valid) return false;
 
     *switch_us = c->switch_latency_us;

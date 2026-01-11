@@ -29,14 +29,25 @@
 #define EMBEDDED_HW_LATENCY_TEST 1
 #endif
 
-// Check if --daemon flag is present in command line arguments
-static bool check_daemon_flag(int argc, char const *argv[]) {
-    for (int i = 1; i < argc; i++) {
+// Check if --daemon flag is present and remove it from argv
+// Returns true if --daemon was found, also updates argc
+static bool check_and_remove_daemon_flag(int *argc, char const *argv[]) {
+    bool found = false;
+    int new_argc = 0;
+
+    for (int i = 0; i < *argc; i++) {
         if (strcmp(argv[i], "--daemon") == 0 || strcmp(argv[i], "-d") == 0) {
-            return true;
+            found = true;
+            // Skip this argument (don't copy to new position)
+        } else {
+            // Keep this argument
+            argv[new_argc] = argv[i];
+            new_argc++;
         }
     }
-    return false;
+
+    *argc = new_argc;
+    return found;
 }
 
 // force_quit ve signal_handler genelde helpers.h içinde deklarasyon/definasyona sahiptir.
@@ -46,7 +57,16 @@ static bool check_daemon_flag(int argc, char const *argv[]) {
 
 int main(int argc, char const *argv[])
 {
+    // Check for --daemon flag BEFORE anything else, and remove it from argv
+    // so it doesn't confuse DPDK EAL argument parser
+    bool daemon_mode = check_and_remove_daemon_flag(&argc, argv);
+
     printf("=== DPDK TX/RX Application with PRBS-31 & Sequence Validation ===\n");
+    if (daemon_mode) {
+        printf("Mode: DAEMON (will fork to background after latency tests)\n");
+    } else {
+        printf("Mode: FOREGROUND (use --daemon for background mode)\n");
+    }
     printf("TX Cores: %d | RX Cores: %d | VLAN: %s\n",
            NUM_TX_CORES, NUM_RX_CORES,
 #if VLAN_ENABLED
@@ -98,11 +118,9 @@ int main(int argc, char const *argv[])
 
         printf("=== Latency test sequence complete ===\n");
 
-        // Check if --daemon flag is present
+        // daemon_mode was already set at the start of main()
         // If yes: fork to background (for remote execution from main PC)
         // If no: continue in foreground (for direct server execution)
-        bool daemon_mode = check_daemon_flag(argc, argv);
-
         if (daemon_mode) {
             printf("=== Switching to background mode for DPDK operation ===\n\n");
             fflush(stdout);

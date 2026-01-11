@@ -2,6 +2,7 @@
 #include "SystemCommand.h"
 #include <iostream>
 #include <filesystem>
+#include <unistd.h>
 
 // ==================== Global Instances ====================
 

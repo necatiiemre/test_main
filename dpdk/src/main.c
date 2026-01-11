@@ -61,6 +61,9 @@ int main(int argc, char const *argv[])
     // so it doesn't confuse DPDK EAL argument parser
     bool daemon_mode = check_and_remove_daemon_flag(&argc, argv);
 
+    // Set daemon mode flag for helper functions (disables ANSI escape codes in logs)
+    helper_set_daemon_mode(daemon_mode);
+
     printf("=== DPDK TX/RX Application with PRBS-31 & Sequence Validation ===\n");
     if (daemon_mode) {
         printf("Mode: DAEMON (will fork to background after latency tests)\n");

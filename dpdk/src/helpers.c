@@ -11,6 +11,13 @@
 #include "dpdk_external_tx.h" // External TX stats için
 #include "raw_socket_port.h"  // reset_raw_socket_stats için
 
+// Daemon mode flag - when true, ANSI escape codes are disabled
+bool g_daemon_mode = false;
+
+void helper_set_daemon_mode(bool enabled) {
+    g_daemon_mode = enabled;
+}
+
 // Yardımcı fonksiyonlar
 static inline double to_gbps(uint64_t bytes) {
     return (bytes * 8.0) / 1e9;
@@ -38,8 +45,15 @@ void helper_print_stats(const struct ports_config *ports_config,
                         const uint64_t prev_tx_bytes[], const uint64_t prev_rx_bytes[],
                         bool warmup_complete, unsigned loop_count, unsigned test_time)
 {
-    // Ekranı temizle
-    printf("\033[2J\033[H");
+    // Ekranı temizle (sadece interaktif modda, daemon modda log dosyası için devre dışı)
+    if (!g_daemon_mode) {
+        printf("\033[2J\033[H");
+    } else {
+        // Daemon modda: Tablolar arasında ayırıcı satır
+        printf("\n========== [%s %u sn] ==========\n",
+               warmup_complete ? "TEST" : "WARM-UP",
+               warmup_complete ? test_time : loop_count);
+    }
 
     // Başlık (240 karakter genişlik)
     printf("╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗\n");

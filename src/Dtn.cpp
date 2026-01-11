@@ -185,8 +185,15 @@ bool Dtn::runDpdkInteractive(const std::string& eal_args, const std::string& mak
     std::cout << std::endl;
 
     std::string remote_dir = g_ssh_deployer_server.getRemoteDirectory();
+
+    // IMPORTANT: Don't pipe password to sudo, it breaks stdin for interactive input!
+    // Instead: First authenticate sudo (caches credentials), then run DPDK
+    // sudo -v = validate/refresh sudo timestamp without running a command
+    // sudo -S = read password from stdin (only for the -v part)
+    // After -v succeeds, subsequent sudo commands don't need password (within timeout)
     std::string dpdk_command = "cd " + remote_dir + "/dpdk && "
-                               "echo '" + std::string("q") + "' | sudo -S ./dpdk_app " + eal_args;
+                               "echo 'q' | sudo -S -v && "  // Authenticate sudo first
+                               "sudo ./dpdk_app " + eal_args;  // Then run without pipe
 
     bool result = g_ssh_deployer_server.executeInteractive(dpdk_command, false);
 

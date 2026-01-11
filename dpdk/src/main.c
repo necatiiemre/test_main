@@ -4,6 +4,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <string.h>
 
 #include "helpers.h" // helper_reset_stats, helper_print_stats, signal_handler / force_quit
 #include "port_manager.h"
@@ -25,6 +29,27 @@
 #define EMBEDDED_HW_LATENCY_TEST 1
 #endif
 
+// Check if --daemon flag is present and remove it from argv
+// Returns true if --daemon was found, also updates argc
+static bool check_and_remove_daemon_flag(int *argc, char const *argv[]) {
+    bool found = false;
+    int new_argc = 0;
+
+    for (int i = 0; i < *argc; i++) {
+        if (strcmp(argv[i], "--daemon") == 0 || strcmp(argv[i], "-d") == 0) {
+            found = true;
+            // Skip this argument (don't copy to new position)
+        } else {
+            // Keep this argument
+            argv[new_argc] = argv[i];
+            new_argc++;
+        }
+    }
+
+    *argc = new_argc;
+    return found;
+}
+
 // force_quit ve signal_handler genelde helpers.h içinde deklarasyon/definasyona sahiptir.
 // Eğer sende helpers.h içinde yoksa, şu satırları açabilirsin:
 // volatile bool force_quit = false;
@@ -32,7 +57,19 @@
 
 int main(int argc, char const *argv[])
 {
+    // Check for --daemon flag BEFORE anything else, and remove it from argv
+    // so it doesn't confuse DPDK EAL argument parser
+    bool daemon_mode = check_and_remove_daemon_flag(&argc, argv);
+
+    // Set daemon mode flag for helper functions (disables ANSI escape codes in logs)
+    helper_set_daemon_mode(daemon_mode);
+
     printf("=== DPDK TX/RX Application with PRBS-31 & Sequence Validation ===\n");
+    if (daemon_mode) {
+        printf("Mode: DAEMON (will fork to background after latency tests)\n");
+    } else {
+        printf("Mode: FOREGROUND (use --daemon for background mode)\n");
+    }
     printf("TX Cores: %d | RX Cores: %d | VLAN: %s\n",
            NUM_TX_CORES, NUM_RX_CORES,
 #if VLAN_ENABLED
@@ -82,7 +119,67 @@ int main(int argc, char const *argv[])
         //            switch_us, total_us, unit_us);
         // }
 
-        printf("=== Latency test sequence complete, initializing DPDK ===\n\n");
+        printf("=== Latency test sequence complete ===\n");
+
+        // daemon_mode was already set at the start of main()
+        // If yes: fork to background (for remote execution from main PC)
+        // If no: continue in foreground (for direct server execution)
+        if (daemon_mode) {
+            printf("=== Switching to background mode for DPDK operation ===\n\n");
+            fflush(stdout);
+            fflush(stderr);
+
+            // Fork to background: Parent exits (SSH closes), Child continues
+            pid_t pid = fork();
+            if (pid < 0) {
+                // Fork failed
+                perror("fork failed");
+                printf("Continuing in foreground mode...\n");
+            } else if (pid > 0) {
+                // Parent process - exit so SSH connection closes
+                printf("DPDK continuing in background (PID: %d)\n", pid);
+                printf("Log file: /tmp/dpdk_app.log\n");
+                printf("To monitor: ssh user@server 'tail -f /tmp/dpdk_app.log'\n");
+                printf("To stop: ssh user@server 'sudo pkill -f dpdk_app'\n");
+                fflush(stdout);
+                _exit(0);  // Use _exit to avoid flushing stdio buffers twice
+            } else {
+                // Child process - continue running DPDK in background
+                // Create new session to detach from terminal
+                setsid();
+
+                // Redirect stdout/stderr to log file
+                int log_fd = open("/tmp/dpdk_app.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (log_fd >= 0) {
+                    dup2(log_fd, STDOUT_FILENO);
+                    dup2(log_fd, STDERR_FILENO);
+                    close(log_fd);
+                }
+
+                // Close stdin
+                close(STDIN_FILENO);
+                open("/dev/null", O_RDONLY);
+
+                printf("\n=== DPDK Background Mode Started (PID: %d) ===\n", getpid());
+                printf("Initializing DPDK EAL...\n\n");
+
+                // Re-print embedded latency results to log file
+                // (They were printed to terminal before fork, now save to log)
+                printf("=== Embedded Latency Test Results (from interactive session) ===\n");
+                emb_latency_print_combined();
+                if (latency_fails > 0) {
+                    printf("WARNING: %d test(s) failed!\n", latency_fails);
+                } else {
+                    printf("All latency tests PASSED!\n");
+                }
+                printf("=== End of Latency Results ===\n\n");
+
+                fflush(stdout);
+            }
+        } else {
+            // Foreground mode - continue normally
+            printf("=== Continuing in foreground mode ===\n\n");
+        }
     } else {
         printf("=== Latency test skipped, initializing DPDK ===\n\n");
     }

@@ -2,6 +2,7 @@
 #include "SystemCommand.h"
 #include <iostream>
 #include <filesystem>
+#include <unistd.h>
 
 // ==================== Global Instances ====================
 
@@ -521,6 +522,39 @@ bool SSHDeployer::executeBackground(const std::string& command) {
     }
 }
 
+bool SSHDeployer::executeInteractive(const std::string& command, bool use_sudo) {
+    std::string actual_command = command;
+    if (use_sudo) {
+        // Use sudo with password via stdin
+        actual_command = "echo '" + m_password + "' | sudo -S " + command;
+    }
+
+    std::cout << getLogPrefix() << " Executing interactively: " << command;
+    if (use_sudo) std::cout << " (with sudo)";
+    std::cout << std::endl;
+
+    // Build SSH command with -t flag for pseudo-terminal allocation
+    // -t forces PTY allocation even when stdin is not a terminal
+    // This allows interactive programs (getchar, fgets, etc.) to work
+    std::string ssh_cmd = "sshpass -p '" + m_password + "' "
+                          "ssh -t -o StrictHostKeyChecking=no "
+                          "-o ConnectTimeout=10 "
+                          + m_username + "@" + m_host + " "
+                          "\"" + actual_command + "\"";
+
+    // Use system() for true interactive execution
+    // This connects stdin/stdout directly to the terminal
+    int ret = system(ssh_cmd.c_str());
+
+    if (ret == 0) {
+        std::cout << getLogPrefix() << " Interactive command completed successfully" << std::endl;
+        return true;
+    } else {
+        std::cerr << getLogPrefix() << " Interactive command failed with exit code: " << ret << std::endl;
+        return false;
+    }
+}
+
 bool SSHDeployer::run(const std::string& app_name, const std::string& args) {
     std::string full_path = m_remote_directory + "/" + app_name;
     std::string command = full_path;
@@ -790,43 +824,69 @@ bool SSHDeployer::deployAndBuild(const std::string& local_source_dir,
 bool SSHDeployer::stopApplication(const std::string& app_name, bool use_sudo) {
     std::cout << getLogPrefix() << " Stopping application: " << app_name << std::endl;
 
-    // Find and kill process by name
-    std::string kill_cmd = "pkill -f '" + app_name + "'";
+    // Combine sudo auth + kill in single command to avoid credential expiry
+    // Use shell script approach for reliability
+    std::string kill_script;
     if (use_sudo) {
-        kill_cmd = "echo '" + m_password + "' | sudo -S pkill -f '" + app_name + "'";
+        // Single command: auth sudo, then kill with SIGTERM, wait, then SIGKILL if needed
+        kill_script = "echo '" + m_password + "' | sudo -S -v 2>/dev/null && "
+                      "sudo pkill -TERM -f " + app_name + " 2>/dev/null; "
+                      "sleep 1; "
+                      "sudo pkill -9 -f " + app_name + " 2>/dev/null; "
+                      "echo KILL_DONE";
+    } else {
+        kill_script = "pkill -TERM -f " + app_name + " 2>/dev/null; "
+                      "sleep 1; "
+                      "pkill -9 -f " + app_name + " 2>/dev/null; "
+                      "echo KILL_DONE";
     }
 
-    std::string ssh_cmd = buildSSHCommand(kill_cmd);
+    std::string ssh_cmd = buildSSHCommand(kill_script);
+    std::cout << getLogPrefix() << " Executing kill command..." << std::endl;
     auto result = g_systemCommand.execute(ssh_cmd);
 
-    // pkill returns 0 if process found and killed, 1 if no process found
-    // Both are acceptable outcomes
-    if (result.success || result.output.find("no process") != std::string::npos) {
-        std::cout << getLogPrefix() << " Application stopped (or was not running)" << std::endl;
-        return true;
+    // Debug output
+    std::cout << getLogPrefix() << " Kill result: " << (result.success ? "OK" : "FAIL")
+              << " output: " << result.output << std::endl;
+
+    // Wait a moment
+    usleep(500000);  // 500ms
+
+    // Verify process is stopped
+    if (isApplicationRunning(app_name)) {
+        std::cerr << getLogPrefix() << " WARNING: Process might still be running!" << std::endl;
+
+        // Last resort: try killall
+        std::string killall_cmd = use_sudo
+            ? "echo '" + m_password + "' | sudo -S killall -9 " + app_name + " 2>/dev/null || true"
+            : "killall -9 " + app_name + " 2>/dev/null || true";
+
+        ssh_cmd = buildSSHCommand(killall_cmd);
+        g_systemCommand.execute(ssh_cmd);
+        usleep(500000);
+
+        if (isApplicationRunning(app_name)) {
+            std::cerr << getLogPrefix() << " FAILED to stop " << app_name << std::endl;
+            return false;
+        }
     }
 
-    // Double check with SIGKILL
-    std::string kill9_cmd = "pkill -9 -f '" + app_name + "'";
-    if (use_sudo) {
-        kill9_cmd = "echo '" + m_password + "' | sudo -S pkill -9 -f '" + app_name + "'";
-    }
-
-    ssh_cmd = buildSSHCommand(kill9_cmd);
-    g_systemCommand.execute(ssh_cmd);
-
-    std::cout << getLogPrefix() << " Force kill sent" << std::endl;
+    std::cout << getLogPrefix() << " Application stopped successfully" << std::endl;
     return true;
 }
 
 bool SSHDeployer::isApplicationRunning(const std::string& app_name) {
-    std::string check_cmd = "pgrep -f '" + app_name + "' > /dev/null && echo 'RUNNING' || echo 'NOT_RUNNING'";
+    // Use pgrep to check if process exists, also show PID for debugging
+    std::string check_cmd = "pgrep -f '" + app_name + "' && echo 'PROC_FOUND' || echo 'PROC_NOT_FOUND'";
     std::string ssh_cmd = buildSSHCommand(check_cmd);
 
     auto result = g_systemCommand.execute(ssh_cmd);
 
-    bool running = result.success && result.output.find("RUNNING") != std::string::npos
-                   && result.output.find("NOT_RUNNING") == std::string::npos;
+    // Debug: show raw output
+    std::cout << getLogPrefix() << " [DEBUG] pgrep output: '" << result.output << "'" << std::endl;
+
+    bool running = result.output.find("PROC_FOUND") != std::string::npos
+                   && result.output.find("PROC_NOT_FOUND") == std::string::npos;
 
     std::cout << getLogPrefix() << " Application '" << app_name << "' is "
               << (running ? "RUNNING" : "NOT RUNNING") << std::endl;

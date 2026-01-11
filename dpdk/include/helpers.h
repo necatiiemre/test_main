@@ -4,6 +4,15 @@
 #include "common.h"
 #include "port.h"
 
+// Daemon mode flag - when true, ANSI escape codes are disabled for log file output
+extern bool g_daemon_mode;
+
+/**
+ * Set daemon mode flag
+ * When enabled, ANSI escape codes are disabled in helper_print_stats
+ */
+void helper_set_daemon_mode(bool enabled);
+
 /**
  * Signal handler for graceful shutdown
  * Catches SIGINT (Ctrl+C) and SIGTERM

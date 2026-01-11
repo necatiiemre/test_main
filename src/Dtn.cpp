@@ -7,6 +7,16 @@
 #include <iomanip>
 #include <filesystem>
 #include <limits>
+#include <csignal>
+#include <atomic>
+
+// Global flag for Ctrl+C handling in DPDK monitoring
+static std::atomic<bool> g_dpdk_monitoring_running{true};
+
+static void dpdk_monitor_signal_handler(int sig) {
+    (void)sig;
+    g_dpdk_monitoring_running = false;
+}
 
 // PSU Configuration: 28V 3.0A
 
@@ -143,6 +153,78 @@ bool Dtn::runLatencyTest(const std::string &run_args, int timeout_seconds)
     return result;
 }
 
+bool Dtn::runDpdkInteractive(const std::string& eal_args, const std::string& make_args)
+{
+    std::cout << "======================================" << std::endl;
+    std::cout << "DTN: DPDK Interactive Deployment" << std::endl;
+    std::cout << "======================================" << std::endl;
+
+    // Step 1: Test connection
+    if (!g_ssh_deployer_server.testConnection())
+    {
+        std::cerr << "DTN: Cannot connect to server!" << std::endl;
+        return false;
+    }
+
+    // Step 2: Deploy and build DPDK (without running)
+    std::cout << "DTN: Deploying and building DPDK..." << std::endl;
+    if (!g_ssh_deployer_server.deployAndBuild(
+            "dpdk",             // source folder
+            "",                 // app name (auto-detect)
+            false,              // DON'T run after build (we'll run interactively)
+            false,              // no sudo for build
+            BuildSystem::AUTO,  // auto-detect (will find Makefile)
+            "",                 // no run args (not running yet)
+            make_args,          // make args (e.g., "NUM_TX_CORES=4")
+            false               // not background
+            ))
+    {
+        std::cerr << "DTN: DPDK build failed!" << std::endl;
+        return false;
+    }
+
+    // Step 3: Run DPDK interactively
+    // User can answer y/n prompts for latency tests
+    // After tests complete, DPDK will fork to background automatically
+    std::cout << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << "DTN: Starting DPDK Interactive Mode" << std::endl;
+    std::cout << "DTN: You can answer latency test prompts (y/n)" << std::endl;
+    std::cout << "DTN: After tests, DPDK will continue in background" << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << std::endl;
+
+    std::string remote_dir = g_ssh_deployer_server.getRemoteDirectory();
+
+    // IMPORTANT: Don't pipe password to sudo, it breaks stdin for interactive input!
+    // Instead: First authenticate sudo (caches credentials), then run DPDK
+    // sudo -v = validate/refresh sudo timestamp without running a command
+    // sudo -S = read password from stdin (only for the -v part)
+    // After -v succeeds, subsequent sudo commands don't need password (within timeout)
+    // --daemon flag: tells DPDK to fork to background after latency tests
+    std::string dpdk_command = "cd " + remote_dir + "/dpdk && "
+                               "echo 'q' | sudo -S -v && "  // Authenticate sudo first
+                               "sudo ./dpdk_app --daemon " + eal_args;  // --daemon for background mode
+
+    bool result = g_ssh_deployer_server.executeInteractive(dpdk_command, false);
+
+    if (result)
+    {
+        std::cout << std::endl;
+        std::cout << "======================================" << std::endl;
+        std::cout << "DTN: DPDK started successfully!" << std::endl;
+        std::cout << "DTN: Running in background on server" << std::endl;
+        std::cout << "DTN: Log file: /tmp/dpdk_app.log" << std::endl;
+        std::cout << "======================================" << std::endl;
+    }
+    else
+    {
+        std::cerr << "DTN: DPDK interactive execution failed!" << std::endl;
+    }
+
+    return result;
+}
+
 bool Dtn::configureSequence()
 {
     // Create and connect PSU for DTN
@@ -238,29 +320,68 @@ bool Dtn::configureSequence()
     //               << timeForwarder.getLastError() << std::endl;
     // }
 
-    // DPDK - arka planda çalıştır (sürekli çalışan uygulama)
-    //  if (!g_ssh_deployer_server.deployAndBuild(
-    //          "dpdk",            // kaynak klasör
-    //          "",                // app name (otomatik algılar)
-    //          true,              // çalıştır
-    //          true,              // sudo ile (DPDK için gerekli)
-    //          BuildSystem::AUTO, // otomatik algıla (Makefile bulacak)
-    //          "-l 0-255 -n 16",  // EAL parametreleri
-    //          "",                // make args (opsiyonel: "NUM_TX_CORES=4")
-    //          true               // ARKA PLANDA ÇALIŞTIR!
-    //          ))
-    //  {
-    //      std::cout << "DTN: DPDK deployment unsuccessful!" << std::endl;
-    //      return false;
-    //  }
+    // DPDK - Interactive mode with embedded latency test
+    // 1. Deploy and build DPDK on server
+    // 2. Run interactively (user answers y/n for latency tests)
+    // 3. After latency tests, DPDK forks to background automatically
+    if (!runDpdkInteractive("-l 0-255 -n 16"))
+    {
+        std::cout << "DTN: DPDK deployment unsuccessful!" << std::endl;
+        return false;
+    }
 
-    // DPDK başladı, şimdi istediğin işlemleri yap
-    // sleep(360);
+    // DPDK is now running in background on server
+    // Main software can continue with other tasks
+    std::cout << "DTN: DPDK is running in background, continuing..." << std::endl;
 
-    // Ask user if they want to run latency test
-    latencyTestSequence();
+    // Monitor DPDK stats every 10 seconds until Ctrl+C
+    std::cout << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << "DTN: Monitoring DPDK (every 10 seconds)" << std::endl;
+    std::cout << "DTN: Press Ctrl+C to stop" << std::endl;
+    std::cout << "======================================" << std::endl;
 
-    utils::waitForCtrlC();
+    // Setup signal handler for Ctrl+C
+    g_dpdk_monitoring_running = true;
+    struct sigaction sa;
+    sa.sa_handler = dpdk_monitor_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+
+    while (g_dpdk_monitoring_running)
+    {
+        // Wait 10 seconds (check flag each second)
+        for (int i = 0; i < 10 && g_dpdk_monitoring_running; i++)
+        {
+            sleep(1);
+        }
+
+        if (!g_dpdk_monitoring_running) break;
+
+        // Fetch latest complete stats table from DPDK log
+        // Get content from the last "==========" separator to end of file
+        // This ensures we get a complete table, not a partial one
+        std::string output;
+        g_ssh_deployer_server.execute(
+            "grep -n '==========' /tmp/dpdk_app.log | tail -1 | cut -d: -f1 | "
+            "xargs -I{} tail -n +{} /tmp/dpdk_app.log",
+            &output, false);
+
+        if (!output.empty())
+        {
+            // Clear screen and show latest stats
+            std::cout << "\033[2J\033[H";  // Clear screen, move cursor to top
+            std::cout << "=== DPDK Live Stats (Press Ctrl+C to stop) ===" << std::endl;
+            std::cout << output << std::endl;
+        }
+        else
+        {
+            std::cout << "(No log output yet - DPDK might still be starting)" << std::endl;
+        }
+    }
+
+    std::cout << "\nDTN: Monitoring stopped (Ctrl+C received)." << std::endl;
 
     // Stop SerialTimeForwarder and show stats
     // if (timeForwarder.isRunning())
@@ -273,11 +394,30 @@ bool Dtn::configureSequence()
     //     std::cout << "DTN: SerialTimeForwarder stopped." << std::endl;
     // }
 
-    // Çalışıyor mu kontrol et ve durdur
-    //  if (g_ssh_deployer_server.isApplicationRunning("dpdk_app"))
-    //  {
-    //      g_ssh_deployer_server.stopApplication("dpdk_app", true);
-    //  }
+    // Stop DPDK on server
+    std::cout << "DTN: Stopping DPDK on server..." << std::endl;
+    if (g_ssh_deployer_server.isApplicationRunning("dpdk_app"))
+    {
+        g_ssh_deployer_server.stopApplication("dpdk_app", true);
+        std::cout << "DTN: DPDK stopped." << std::endl;
+    }
+    else
+    {
+        std::cout << "DTN: DPDK was not running." << std::endl;
+    }
+
+    // Fetch DPDK log from server to local PC
+    std::cout << "DTN: Fetching DPDK log from server..." << std::endl;
+    ensureLogDirectories();
+    std::string local_dpdk_log = LogPaths::DTN() + "/dpdk_app.log";
+    if (g_ssh_deployer_server.fetchFile("/tmp/dpdk_app.log", local_dpdk_log))
+    {
+        std::cout << "DTN: DPDK log saved to: " << local_dpdk_log << std::endl;
+    }
+    else
+    {
+        std::cerr << "DTN: Failed to fetch DPDK log (file may not exist)" << std::endl;
+    }
     //  // Monitor PSU measurements
     //  for (int i = 0; i < 1000; i++)
     //  {

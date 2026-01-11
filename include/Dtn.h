@@ -66,6 +66,23 @@ public:
      */
     bool runLatencyTest(const std::string& run_args = "",
                         int timeout_seconds = 120);
+
+    /**
+     * @brief Deploy, build and run DPDK interactively
+     *
+     * This function:
+     * 1. Deploys DPDK source to remote server
+     * 2. Builds DPDK on remote server
+     * 3. Runs DPDK interactively (user can answer y/n prompts for latency tests)
+     * 4. After latency tests complete, DPDK automatically forks to background
+     * 5. SSH connection closes, main software continues
+     *
+     * @param eal_args EAL arguments (e.g., "-l 0-255 -n 16")
+     * @param make_args Optional make arguments (e.g., "NUM_TX_CORES=4")
+     * @return true on success
+     */
+    bool runDpdkInteractive(const std::string& eal_args = "-l 0-255 -n 16",
+                            const std::string& make_args = "");
 };
 
 extern Dtn g_dtn;

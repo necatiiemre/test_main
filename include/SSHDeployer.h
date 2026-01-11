@@ -213,6 +213,21 @@ public:
     bool executeBackground(const std::string& command);
 
     /**
+     * @brief Execute command interactively on remote server
+     *
+     * Uses system() with SSH -t flag to allocate a pseudo-terminal.
+     * Allows user to provide input (stdin) directly from the terminal.
+     * Blocks until the remote command completes.
+     *
+     * Use this for applications that require user interaction (y/n prompts, etc.)
+     *
+     * @param command Command to execute
+     * @param use_sudo Run with sudo (optional)
+     * @return true on success (exit code 0)
+     */
+    bool executeInteractive(const std::string& command, bool use_sudo = false);
+
+    /**
      * @brief Run deployed application
      * @param app_name Application name
      * @param args Arguments (optional)

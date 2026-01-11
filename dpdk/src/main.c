@@ -4,6 +4,9 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "helpers.h" // helper_reset_stats, helper_print_stats, signal_handler / force_quit
 #include "port_manager.h"
@@ -82,7 +85,46 @@ int main(int argc, char const *argv[])
         //            switch_us, total_us, unit_us);
         // }
 
-        printf("=== Latency test sequence complete, initializing DPDK ===\n\n");
+        printf("=== Latency test sequence complete ===\n");
+        printf("=== Switching to background mode for DPDK operation ===\n\n");
+        fflush(stdout);
+        fflush(stderr);
+
+        // Fork to background: Parent exits (SSH closes), Child continues
+        pid_t pid = fork();
+        if (pid < 0) {
+            // Fork failed
+            perror("fork failed");
+            printf("Continuing in foreground mode...\n");
+        } else if (pid > 0) {
+            // Parent process - exit so SSH connection closes
+            printf("DPDK continuing in background (PID: %d)\n", pid);
+            printf("Log file: /tmp/dpdk_app.log\n");
+            printf("To monitor: ssh user@server 'tail -f /tmp/dpdk_app.log'\n");
+            printf("To stop: ssh user@server 'sudo pkill -f dpdk_app'\n");
+            fflush(stdout);
+            _exit(0);  // Use _exit to avoid flushing stdio buffers twice
+        } else {
+            // Child process - continue running DPDK in background
+            // Create new session to detach from terminal
+            setsid();
+
+            // Redirect stdout/stderr to log file
+            int log_fd = open("/tmp/dpdk_app.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (log_fd >= 0) {
+                dup2(log_fd, STDOUT_FILENO);
+                dup2(log_fd, STDERR_FILENO);
+                close(log_fd);
+            }
+
+            // Close stdin
+            close(STDIN_FILENO);
+            open("/dev/null", O_RDONLY);
+
+            printf("\n=== DPDK Background Mode Started (PID: %d) ===\n", getpid());
+            printf("Initializing DPDK EAL...\n\n");
+            fflush(stdout);
+        }
     } else {
         printf("=== Latency test skipped, initializing DPDK ===\n\n");
     }

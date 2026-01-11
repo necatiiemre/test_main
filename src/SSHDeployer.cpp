@@ -521,6 +521,39 @@ bool SSHDeployer::executeBackground(const std::string& command) {
     }
 }
 
+bool SSHDeployer::executeInteractive(const std::string& command, bool use_sudo) {
+    std::string actual_command = command;
+    if (use_sudo) {
+        // Use sudo with password via stdin
+        actual_command = "echo '" + m_password + "' | sudo -S " + command;
+    }
+
+    std::cout << getLogPrefix() << " Executing interactively: " << command;
+    if (use_sudo) std::cout << " (with sudo)";
+    std::cout << std::endl;
+
+    // Build SSH command with -t flag for pseudo-terminal allocation
+    // -t forces PTY allocation even when stdin is not a terminal
+    // This allows interactive programs (getchar, fgets, etc.) to work
+    std::string ssh_cmd = "sshpass -p '" + m_password + "' "
+                          "ssh -t -o StrictHostKeyChecking=no "
+                          "-o ConnectTimeout=10 "
+                          + m_username + "@" + m_host + " "
+                          "\"" + actual_command + "\"";
+
+    // Use system() for true interactive execution
+    // This connects stdin/stdout directly to the terminal
+    int ret = system(ssh_cmd.c_str());
+
+    if (ret == 0) {
+        std::cout << getLogPrefix() << " Interactive command completed successfully" << std::endl;
+        return true;
+    } else {
+        std::cerr << getLogPrefix() << " Interactive command failed with exit code: " << ret << std::endl;
+        return false;
+    }
+}
+
 bool SSHDeployer::run(const std::string& app_name, const std::string& args) {
     std::string full_path = m_remote_directory + "/" + app_name;
     std::string command = full_path;

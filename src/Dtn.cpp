@@ -347,6 +347,19 @@ bool Dtn::configureSequence()
     {
         std::cout << "DTN: DPDK was not running." << std::endl;
     }
+
+    // Fetch DPDK log from server to local PC
+    std::cout << "DTN: Fetching DPDK log from server..." << std::endl;
+    ensureLogDirectories();
+    std::string local_dpdk_log = LogPaths::DTN() + "/dpdk_app.log";
+    if (g_ssh_deployer_server.fetchFile("/tmp/dpdk_app.log", local_dpdk_log))
+    {
+        std::cout << "DTN: DPDK log saved to: " << local_dpdk_log << std::endl;
+    }
+    else
+    {
+        std::cerr << "DTN: Failed to fetch DPDK log (file may not exist)" << std::endl;
+    }
     //  // Monitor PSU measurements
     //  for (int i = 0; i < 1000; i++)
     //  {

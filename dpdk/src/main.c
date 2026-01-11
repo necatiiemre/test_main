@@ -123,6 +123,18 @@ int main(int argc, char const *argv[])
 
             printf("\n=== DPDK Background Mode Started (PID: %d) ===\n", getpid());
             printf("Initializing DPDK EAL...\n\n");
+
+            // Re-print embedded latency results to log file
+            // (They were printed to terminal before fork, now save to log)
+            printf("=== Embedded Latency Test Results (from interactive session) ===\n");
+            emb_latency_print_combined();
+            if (latency_fails > 0) {
+                printf("WARNING: %d test(s) failed!\n", latency_fails);
+            } else {
+                printf("All latency tests PASSED!\n");
+            }
+            printf("=== End of Latency Results ===\n\n");
+
             fflush(stdout);
         }
     } else {

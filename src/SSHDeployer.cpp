@@ -824,41 +824,49 @@ bool SSHDeployer::deployAndBuild(const std::string& local_source_dir,
 bool SSHDeployer::stopApplication(const std::string& app_name, bool use_sudo) {
     std::cout << getLogPrefix() << " Stopping application: " << app_name << std::endl;
 
-    // First, authenticate sudo separately to avoid pipe issues
+    // Combine sudo auth + kill in single command to avoid credential expiry
+    // Use shell script approach for reliability
+    std::string kill_script;
     if (use_sudo) {
-        std::string auth_cmd = "echo '" + m_password + "' | sudo -S -v";
-        std::string ssh_auth = buildSSHCommand(auth_cmd);
-        g_systemCommand.execute(ssh_auth);
+        // Single command: auth sudo, then kill with SIGTERM, wait, then SIGKILL if needed
+        kill_script = "echo '" + m_password + "' | sudo -S -v 2>/dev/null && "
+                      "sudo pkill -TERM -f " + app_name + " 2>/dev/null; "
+                      "sleep 1; "
+                      "sudo pkill -9 -f " + app_name + " 2>/dev/null; "
+                      "echo KILL_DONE";
+    } else {
+        kill_script = "pkill -TERM -f " + app_name + " 2>/dev/null; "
+                      "sleep 1; "
+                      "pkill -9 -f " + app_name + " 2>/dev/null; "
+                      "echo KILL_DONE";
     }
 
-    // Kill with SIGTERM first (graceful)
-    std::string kill_cmd = use_sudo
-        ? "sudo pkill -TERM -f '" + app_name + "'"
-        : "pkill -TERM -f '" + app_name + "'";
-
-    std::string ssh_cmd = buildSSHCommand(kill_cmd);
+    std::string ssh_cmd = buildSSHCommand(kill_script);
+    std::cout << getLogPrefix() << " Executing kill command..." << std::endl;
     auto result = g_systemCommand.execute(ssh_cmd);
 
-    // Wait a moment for graceful shutdown
+    // Debug output
+    std::cout << getLogPrefix() << " Kill result: " << (result.success ? "OK" : "FAIL")
+              << " output: " << result.output << std::endl;
+
+    // Wait a moment
     usleep(500000);  // 500ms
 
-    // Check if still running
+    // Verify process is stopped
     if (isApplicationRunning(app_name)) {
-        std::cout << getLogPrefix() << " Process still running, sending SIGKILL..." << std::endl;
+        std::cerr << getLogPrefix() << " WARNING: Process might still be running!" << std::endl;
 
-        // Force kill with SIGKILL
-        std::string kill9_cmd = use_sudo
-            ? "sudo pkill -9 -f '" + app_name + "'"
-            : "pkill -9 -f '" + app_name + "'";
+        // Last resort: try killall
+        std::string killall_cmd = use_sudo
+            ? "echo '" + m_password + "' | sudo -S killall -9 " + app_name + " 2>/dev/null || true"
+            : "killall -9 " + app_name + " 2>/dev/null || true";
 
-        ssh_cmd = buildSSHCommand(kill9_cmd);
+        ssh_cmd = buildSSHCommand(killall_cmd);
         g_systemCommand.execute(ssh_cmd);
-
-        // Wait and verify
-        usleep(500000);  // 500ms
+        usleep(500000);
 
         if (isApplicationRunning(app_name)) {
-            std::cerr << getLogPrefix() << " WARNING: Failed to stop " << app_name << std::endl;
+            std::cerr << getLogPrefix() << " FAILED to stop " << app_name << std::endl;
             return false;
         }
     }
@@ -868,13 +876,17 @@ bool SSHDeployer::stopApplication(const std::string& app_name, bool use_sudo) {
 }
 
 bool SSHDeployer::isApplicationRunning(const std::string& app_name) {
-    std::string check_cmd = "pgrep -f '" + app_name + "' > /dev/null && echo 'RUNNING' || echo 'NOT_RUNNING'";
+    // Use pgrep to check if process exists, also show PID for debugging
+    std::string check_cmd = "pgrep -f '" + app_name + "' && echo 'PROC_FOUND' || echo 'PROC_NOT_FOUND'";
     std::string ssh_cmd = buildSSHCommand(check_cmd);
 
     auto result = g_systemCommand.execute(ssh_cmd);
 
-    bool running = result.success && result.output.find("RUNNING") != std::string::npos
-                   && result.output.find("NOT_RUNNING") == std::string::npos;
+    // Debug: show raw output
+    std::cout << getLogPrefix() << " [DEBUG] pgrep output: '" << result.output << "'" << std::endl;
+
+    bool running = result.output.find("PROC_FOUND") != std::string::npos
+                   && result.output.find("PROC_NOT_FOUND") == std::string::npos;
 
     std::cout << getLogPrefix() << " Application '" << app_name << "' is "
               << (running ? "RUNNING" : "NOT RUNNING") << std::endl;

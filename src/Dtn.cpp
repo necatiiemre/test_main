@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <limits>
+#include <csignal>
 
 // PSU Configuration: 28V 3.0A
 
@@ -323,7 +324,50 @@ bool Dtn::configureSequence()
     // Main software can continue with other tasks
     std::cout << "DTN: DPDK is running in background, continuing..." << std::endl;
 
-    utils::waitForCtrlC();
+    // Monitor DPDK stats every 10 seconds until Ctrl+C
+    std::cout << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << "DTN: Monitoring DPDK (every 10 seconds)" << std::endl;
+    std::cout << "DTN: Press Ctrl+C to stop" << std::endl;
+    std::cout << "======================================" << std::endl;
+
+    volatile bool running = true;
+    signal(SIGINT, [](int) { /* Will be caught by sleep */ });
+
+    while (running)
+    {
+        // Wait 10 seconds (can be interrupted by Ctrl+C)
+        for (int i = 0; i < 10 && running; i++)
+        {
+            if (sleep(1) != 0)
+            {
+                // sleep interrupted (likely by signal)
+                running = false;
+                break;
+            }
+        }
+
+        if (!running) break;
+
+        // Fetch last 50 lines of DPDK log
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "DPDK Stats Update:" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        std::string output;
+        g_ssh_deployer_server.execute("tail -50 /tmp/dpdk_app.log", &output, false);
+
+        if (!output.empty())
+        {
+            std::cout << output << std::endl;
+        }
+        else
+        {
+            std::cout << "(No log output yet)" << std::endl;
+        }
+    }
+
+    std::cout << "\nDTN: Monitoring stopped." << std::endl;
 
     // Stop SerialTimeForwarder and show stats
     // if (timeForwarder.isRunning())

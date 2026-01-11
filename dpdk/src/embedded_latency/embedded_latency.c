@@ -899,48 +899,48 @@ int emb_latency_full_sequence(void) {
     memset(&g_emb_latency, 0, sizeof(g_emb_latency));
 
     // ==========================================
-    // STEP 1: Loopback Test (Mellanox Switch)
+    // STEP 1: Loopback Test (OPTIONAL)
     // ==========================================
     printf("=== STEP 1: Loopback Test (Mellanox Switch Latency) ===\n\n");
 
-    if (ask_question("Do you want to run the Loopback test to measure Mellanox switch latency?")) {
-        // Ask about loopback connectors
-        while (1) {
-            if (ask_question("You need to install the LoopBack connectors.\n"
-                            "Are the connectors installed? Should I start the test?")) {
-                // Run loopback test
+    // Outer loop: Ask if user wants loopback test
+    while (1) {
+        if (ask_question("Do you want to run the Loopback test to measure Mellanox switch latency?")) {
+            // User wants loopback test - ask about cables
+            if (ask_question("Are the loopback cables installed?")) {
+                // Cables installed - run loopback test
                 int fails = emb_latency_run_loopback(1, 100, 30);
                 total_fails += fails;
-                break;
+                break;  // Done with loopback
             } else {
-                if (ask_question("Do you want to skip the Loopback test and use default (14us)?")) {
-                    printf("Using default Mellanox switch latency: %.1f us\n\n",
-                           EMB_LAT_DEFAULT_SWITCH_US);
-                    g_emb_latency.loopback_skipped = true;
-                    break;
-                }
-                printf("\nPlease install the LoopBack connectors and try again.\n\n");
+                // Cables not installed - go back to outer question
+                printf("\nPlease install the loopback cables first.\n\n");
+                // Loop continues - will ask "Do you want loopback test?" again
             }
+        } else {
+            // User doesn't want loopback test - use default
+            printf("Using default Mellanox switch latency: %.1f us\n\n",
+                   EMB_LAT_DEFAULT_SWITCH_US);
+            g_emb_latency.loopback_skipped = true;
+            break;  // Done with loopback
         }
-    } else {
-        printf("Using default Mellanox switch latency: %.1f us\n\n",
-               EMB_LAT_DEFAULT_SWITCH_US);
-        g_emb_latency.loopback_skipped = true;
     }
 
     // ==========================================
-    // STEP 2: Unit Test (Device)
+    // STEP 2: Unit Test (MANDATORY)
     // ==========================================
     printf("=== STEP 2: Unit Test (Device Latency) ===\n\n");
     printf("This test measures total latency through the device.\n");
     printf("Port pairs: 0→1, 1→0, 2→3, 3→2, 4→5, 5→4, 6→7, 7→6\n\n");
 
-    if (ask_question("Do you want to run the Unit Test?")) {
-        int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // 1 packet, 100ms timeout, 100us max
-        total_fails += unit_fails;
-    } else {
-        printf("Unit test skipped by user.\n\n");
+    // Unit test is mandatory - wait for cables to be installed
+    while (!ask_question("Are the unit test cables installed (neighboring ports connected)?")) {
+        printf("\nPlease install the unit test cables and try again.\n\n");
     }
+
+    // Run unit test
+    int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // 1 packet, 100ms timeout, 100us max
+    total_fails += unit_fails;
 
     // ==========================================
     // STEP 3: Calculate Combined Results

@@ -38,7 +38,7 @@ ifeq ($(DPDK_CHECK), no)
 endif
 
 # Default target
-.PHONY: all clean debug static run info help
+.PHONY: all clean debug static run run-daemon stop log log-follow info help
 
 all: $(APP)
 
@@ -68,10 +68,32 @@ clean:
 	@rm -f $(APP) $(APP)-debug $(APP)-static
 	@echo "✓ Clean completed"
 
-# Run with basic EAL parameters
+# Run with basic EAL parameters (foreground mode - for direct server usage)
 run: $(APP)
-	@echo "Running $(APP)..."
-	sudo ./$(APP) -l 0-255 -n 16 
+	@echo "Running $(APP) in FOREGROUND mode..."
+	@echo "Press Ctrl+C to stop"
+	sudo ./$(APP) -l 0-255 -n 16
+
+# Run in daemon/background mode (for remote execution from main PC)
+run-daemon: $(APP)
+	@echo "Running $(APP) in DAEMON mode..."
+	@echo "After latency tests, DPDK will fork to background"
+	@echo "Log file: /tmp/dpdk_app.log"
+	sudo ./$(APP) --daemon -l 0-255 -n 16
+
+# Stop DPDK if running in background
+stop:
+	@echo "Stopping $(APP)..."
+	@sudo pkill -f $(APP) 2>/dev/null || echo "$(APP) was not running"
+	@echo "✓ Stop command sent"
+
+# Show DPDK log (for daemon mode)
+log:
+	@tail -100 /tmp/dpdk_app.log 2>/dev/null || echo "Log file not found"
+
+# Follow DPDK log in real-time
+log-follow:
+	@tail -f /tmp/dpdk_app.log
 
 # Show build information
 info:
@@ -86,10 +108,20 @@ info:
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  all      - Build application (default)"
-	@echo "  debug    - Build with debug symbols"
-	@echo "  static   - Build with static linking"
-	@echo "  clean    - Remove build artifacts"
-	@echo "  run      - Build and run application"
-	@echo "  info     - Show build configuration"
-	@echo "  help     - Show this help"
+	@echo "  all        - Build application (default)"
+	@echo "  debug      - Build with debug symbols"
+	@echo "  static     - Build with static linking"
+	@echo "  clean      - Remove build artifacts"
+	@echo ""
+	@echo "Run targets:"
+	@echo "  run        - Run in FOREGROUND (for direct server usage)"
+	@echo "  run-daemon - Run in DAEMON mode (forks to background after latency tests)"
+	@echo "  stop       - Stop DPDK if running in background"
+	@echo ""
+	@echo "Log targets (for daemon mode):"
+	@echo "  log        - Show last 100 lines of log"
+	@echo "  log-follow - Follow log in real-time (tail -f)"
+	@echo ""
+	@echo "Info:"
+	@echo "  info       - Show build configuration"
+	@echo "  help       - Show this help"

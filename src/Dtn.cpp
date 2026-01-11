@@ -8,6 +8,15 @@
 #include <filesystem>
 #include <limits>
 #include <csignal>
+#include <atomic>
+
+// Global flag for Ctrl+C handling in DPDK monitoring
+static std::atomic<bool> g_dpdk_monitoring_running{true};
+
+static void dpdk_monitor_signal_handler(int sig) {
+    (void)sig;
+    g_dpdk_monitoring_running = false;
+}
 
 // PSU Configuration: 28V 3.0A
 
@@ -331,23 +340,23 @@ bool Dtn::configureSequence()
     std::cout << "DTN: Press Ctrl+C to stop" << std::endl;
     std::cout << "======================================" << std::endl;
 
-    volatile bool running = true;
-    signal(SIGINT, [](int) { /* Will be caught by sleep */ });
+    // Setup signal handler for Ctrl+C
+    g_dpdk_monitoring_running = true;
+    struct sigaction sa;
+    sa.sa_handler = dpdk_monitor_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
 
-    while (running)
+    while (g_dpdk_monitoring_running)
     {
-        // Wait 10 seconds (can be interrupted by Ctrl+C)
-        for (int i = 0; i < 10 && running; i++)
+        // Wait 10 seconds (check flag each second)
+        for (int i = 0; i < 10 && g_dpdk_monitoring_running; i++)
         {
-            if (sleep(1) != 0)
-            {
-                // sleep interrupted (likely by signal)
-                running = false;
-                break;
-            }
+            sleep(1);
         }
 
-        if (!running) break;
+        if (!g_dpdk_monitoring_running) break;
 
         // Fetch last 50 lines of DPDK log
         std::cout << "\n" << std::string(80, '=') << std::endl;
@@ -367,7 +376,7 @@ bool Dtn::configureSequence()
         }
     }
 
-    std::cout << "\nDTN: Monitoring stopped." << std::endl;
+    std::cout << "\nDTN: Monitoring stopped (Ctrl+C received)." << std::endl;
 
     // Stop SerialTimeForwarder and show stats
     // if (timeForwarder.isRunning())

@@ -359,21 +359,25 @@ bool Dtn::configureSequence()
 
         if (!g_dpdk_monitoring_running) break;
 
-        // Fetch last 50 lines of DPDK log
-        std::cout << "\n" << std::string(80, '=') << std::endl;
-        std::cout << "DPDK Stats Update:" << std::endl;
-        std::cout << std::string(80, '=') << std::endl;
-
+        // Fetch latest complete stats table from DPDK log
+        // Get content from the last "==========" separator to end of file
+        // This ensures we get a complete table, not a partial one
         std::string output;
-        g_ssh_deployer_server.execute("tail -50 /tmp/dpdk_app.log", &output, false);
+        g_ssh_deployer_server.execute(
+            "grep -n '==========' /tmp/dpdk_app.log | tail -1 | cut -d: -f1 | "
+            "xargs -I{} tail -n +{} /tmp/dpdk_app.log",
+            &output, false);
 
         if (!output.empty())
         {
+            // Clear screen and show latest stats
+            std::cout << "\033[2J\033[H";  // Clear screen, move cursor to top
+            std::cout << "=== DPDK Live Stats (Press Ctrl+C to stop) ===" << std::endl;
             std::cout << output << std::endl;
         }
         else
         {
-            std::cout << "(No log output yet)" << std::endl;
+            std::cout << "(No log output yet - DPDK might still be starting)" << std::endl;
         }
     }
 

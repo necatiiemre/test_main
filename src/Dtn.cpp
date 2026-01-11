@@ -201,9 +201,10 @@ bool Dtn::runDpdkInteractive(const std::string& eal_args, const std::string& mak
     // sudo -v = validate/refresh sudo timestamp without running a command
     // sudo -S = read password from stdin (only for the -v part)
     // After -v succeeds, subsequent sudo commands don't need password (within timeout)
+    // --daemon flag: tells DPDK to fork to background after latency tests
     std::string dpdk_command = "cd " + remote_dir + "/dpdk && "
                                "echo 'q' | sudo -S -v && "  // Authenticate sudo first
-                               "sudo ./dpdk_app " + eal_args;  // Then run without pipe
+                               "sudo ./dpdk_app --daemon " + eal_args;  // --daemon for background mode
 
     bool result = g_ssh_deployer_server.executeInteractive(dpdk_command, false);
 

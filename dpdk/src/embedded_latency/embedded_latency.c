@@ -889,47 +889,63 @@ int emb_latency_full_sequence(void) {
     printf("\n");
     printf("╔══════════════════════════════════════════════════════════════════╗\n");
     printf("║         LATENCY TEST SEQUENCE                                    ║\n");
-    printf("║  Port pairs: 0↔1, 2↔3, 4↔5, 6↔7 (neighboring ports)             ║\n");
-    printf("║  Matches normal DPDK TX/RX port configuration                    ║\n");
+    printf("║  1. Loopback Test (Mellanox switch latency measurement)          ║\n");
+    printf("║  2. Unit Test (Device latency: 0↔1, 2↔3, 4↔5, 6↔7)              ║\n");
+    printf("║  3. Combined Results (unit = total - switch)                     ║\n");
     printf("╚══════════════════════════════════════════════════════════════════╝\n");
     printf("\n");
 
     // Reset state
     memset(&g_emb_latency, 0, sizeof(g_emb_latency));
 
-    // Use default switch latency (loopback test is optional and rarely used)
-    g_emb_latency.loopback_skipped = true;
+    // ==========================================
+    // STEP 1: Loopback Test (Mellanox Switch)
+    // ==========================================
+    printf("=== STEP 1: Loopback Test (Mellanox Switch Latency) ===\n\n");
 
-    // Ask user if they want to run the latency test
-    if (!ask_question("Do you want to run HW Timestamp Latency Test?")) {
-        printf("Latency test skipped by user.\n\n");
-        g_emb_latency.test_completed = true;
-        g_emb_latency.test_passed = true;
-        return 0;  // Skipped = success
-    }
-
-    // Confirm before starting
-    if (!ask_question("Ready to start latency test on neighboring ports (0↔1, 2↔3, 4↔5, 6↔7)?")) {
-        printf("Latency test skipped by user.\n\n");
-        g_emb_latency.test_completed = true;
-        g_emb_latency.test_passed = true;
-        return 0;  // Skipped = success
+    if (ask_question("Do you want to run the Loopback test to measure Mellanox switch latency?")) {
+        // Ask about loopback connectors
+        while (1) {
+            if (ask_question("You need to install the LoopBack connectors.\n"
+                            "Are the connectors installed? Should I start the test?")) {
+                // Run loopback test
+                int fails = emb_latency_run_loopback(1, 100, 30);
+                total_fails += fails;
+                break;
+            } else {
+                if (ask_question("Do you want to skip the Loopback test and use default (14us)?")) {
+                    printf("Using default Mellanox switch latency: %.1f us\n\n",
+                           EMB_LAT_DEFAULT_SWITCH_US);
+                    g_emb_latency.loopback_skipped = true;
+                    break;
+                }
+                printf("\nPlease install the LoopBack connectors and try again.\n\n");
+            }
+        }
+    } else {
+        printf("Using default Mellanox switch latency: %.1f us\n\n",
+               EMB_LAT_DEFAULT_SWITCH_US);
+        g_emb_latency.loopback_skipped = true;
     }
 
     // ==========================================
-    // STEP 1: Unit Test (Device Latency)
+    // STEP 2: Unit Test (Device)
     // ==========================================
-    printf("\n=== Unit Test (Device Latency) ===\n\n");
-    printf("Testing latency through device on neighboring ports.\n");
+    printf("=== STEP 2: Unit Test (Device Latency) ===\n\n");
+    printf("This test measures total latency through the device.\n");
     printf("Port pairs: 0→1, 1→0, 2→3, 3→2, 4→5, 5→4, 6→7, 7→6\n\n");
 
-    int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // 1 packet, 100ms timeout, 100us max
-    total_fails += unit_fails;
+    if (ask_question("Do you want to run the Unit Test?")) {
+        int unit_fails = emb_latency_run_unit_test(1, 100, 100);  // 1 packet, 100ms timeout, 100us max
+        total_fails += unit_fails;
+    } else {
+        printf("Unit test skipped by user.\n\n");
+    }
 
     // ==========================================
-    // STEP 2: Calculate Combined Results
+    // STEP 3: Calculate Combined Results
     // ==========================================
-    printf("=== Combined Latency Results ===\n\n");
+    printf("=== STEP 3: Combined Latency Results ===\n\n");
 
     emb_latency_calculate_combined();
     emb_latency_print_combined();
